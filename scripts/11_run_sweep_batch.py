@@ -51,7 +51,22 @@ PROCESSED_DIR = REPO_ROOT / "data" / "processed"
 
 MODEL       = "gz_x500_mono_cam"
 SPAWN_POSE  = "14.0505,-7.5229,0.1076,0,0,0"
+SPAWN_X0    = float(SPAWN_POSE.split(",")[0])
+SPAWN_Y0    = float(SPAWN_POSE.split(",")[1])
 WORLD_NAME  = "default"
+
+# Envelope safety boundaries imported from fly_sweep_motion.py
+try:
+    from fly_sweep_motion import LOCAL_X_MIN, LOCAL_X_MAX, LOCAL_Y_MIN, LOCAL_Y_MAX
+except ImportError:
+    try:
+        from scripts.fly_sweep_motion import LOCAL_X_MIN, LOCAL_X_MAX, LOCAL_Y_MIN, LOCAL_Y_MAX
+    except ImportError:
+        LOCAL_X_MIN, LOCAL_X_MAX = -20.0, 20.0
+        LOCAL_Y_MIN, LOCAL_Y_MAX = -25.0, 25.0
+
+ENVELOPE_ALT_MIN = 0.5
+ENVELOPE_ALT_MAX = 5.0
 
 YAW_BINS    = ["G", "M", "A", "E"]
 MOTION_BINS = ["C", "B", "S", "H"]
@@ -150,8 +165,25 @@ def wait_for_camera(env, timeout=75):
     return None
 
 
-def verify_flight_data(flight_dir: Path):
-    """Verify basic gates for raw recording."""
+def verify_flight_data(flight_dir: Path, motion_retcode: int = 0, motion_timed_out: bool = False):
+    """Verify basic, spatial envelope, PX4 failsafe, and motion script gates for raw recording."""
+    # Gate 3(c): Motion Script Exit & Timeout
+    if motion_timed_out:
+        return False, "Motion script gate failed: execution timed out (>55.0s)"
+    if motion_retcode != 0:
+        return False, f"Motion script gate failed: execution exited with non-zero code {motion_retcode}"
+
+    # Gate 3(c): Safety Abort in motion.log
+    motion_log_path = flight_dir / "motion.log"
+    if motion_log_path.exists():
+        try:
+            with open(motion_log_path, "r", errors="replace") as f:
+                for line in f:
+                    if "[EVENT: SAFETY_ABORT]" in line:
+                        return False, f"Motion script gate failed: safety abort detected in motion.log ({line.strip()})"
+        except Exception as e:
+            print(f"  [WARN] Failed to read motion.log: {e}")
+
     gt_path  = flight_dir / "dataset_gt.csv"
     cam_path = flight_dir / "camera_frames.csv"
     img_dir  = flight_dir / "images"
@@ -176,15 +208,62 @@ def verify_flight_data(flight_dir: Path):
     if len(act_idx) < 10:
         return False, "Vehicle never reached 2.0m cruise altitude"
 
-    dur = t[act_idx[-1]] - t[act_idx[0]]
+    dur = float(t[act_idx[-1]] - t[act_idx[0]])
     if dur < 18.0:
-        return False, f"Active duration {dur:.1f}s < 18.0s threshold"
+        return False, f"Active duration gate failed: {dur:.2f}s < 18.0s threshold"
 
     n_img = len(list(img_dir.glob("*.png")))
     if n_img < len(df_cam) - 10:
         return False, f"Image drop: {n_img} PNGs vs {len(df_cam)} cam rows"
 
-    return True, f"PASS (dur={dur:.1f}s, maxZ={z[act_idx].max():.2f}m, imgs={n_img})"
+    # Gate 3(a): Spatial Envelope
+    # Convert GT world positions to local frame using spawn origin:
+    # local_x = pos_x - SPAWN_X0, local_y = pos_y - SPAWN_Y0, alt = pos_z
+    x_local = df_gt["pos_x"].values[act_idx] - SPAWN_X0
+    y_local = df_gt["pos_y"].values[act_idx] - SPAWN_Y0
+    z_act   = z[act_idx]
+    t_act   = t[act_idx]
+
+    x_min, x_max = float(x_local.min()), float(x_local.max())
+    y_min, y_max = float(y_local.min()), float(y_local.max())
+    z_min, z_max = float(z_act.min()), float(z_act.max())
+
+    out_of_bounds = (
+        (x_local < LOCAL_X_MIN) | (x_local > LOCAL_X_MAX) |
+        (y_local < LOCAL_Y_MIN) | (y_local > LOCAL_Y_MAX) |
+        (z_act < ENVELOPE_ALT_MIN) | (z_act > ENVELOPE_ALT_MAX)
+    )
+    if np.any(out_of_bounds):
+        first_viol_idx = int(np.where(out_of_bounds)[0][0])
+        t_viol = float(t_act[first_viol_idx])
+        x_viol = float(x_local[first_viol_idx])
+        y_viol = float(y_local[first_viol_idx])
+        z_viol = float(z_act[first_viol_idx])
+        return False, (
+            f"Envelope gate failed: breach at t={t_viol:.2f}s "
+            f"(first violation: local X={x_viol:.2f}m in [{LOCAL_X_MIN},{LOCAL_X_MAX}], "
+            f"Y={y_viol:.2f}m in [{LOCAL_Y_MIN},{LOCAL_Y_MAX}], Alt={z_viol:.2f}m in [{ENVELOPE_ALT_MIN},{ENVELOPE_ALT_MAX}]; "
+            f"measured ranges: X=[{x_min:.2f},{x_max:.2f}], Y=[{y_min:.2f},{y_max:.2f}], Alt=[{z_min:.2f},{z_max:.2f}])"
+        )
+
+    # Gate 3(b): PX4 Failsafe
+    px4_log_path = flight_dir / "px4_sitl.log"
+    if px4_log_path.exists():
+        failsafe_targets = ["Failsafe activated", "Failsafe: blind land", "invalid setpoints"]
+        found_failsafes = []
+        try:
+            with open(px4_log_path, "r", errors="replace") as f:
+                for line in f:
+                    for target in failsafe_targets:
+                        if target in line:
+                            found_failsafes.append(line.strip())
+                            break
+        except Exception as e:
+            print(f"  [WARN] Failed to read px4_sitl.log: {e}")
+        if found_failsafes:
+            return False, f"PX4 failsafe gate failed: found {len(found_failsafes)} event(s) in px4_sitl.log ({'; '.join(found_failsafes)})"
+
+    return True, f"PASS (dur={dur:.1f}s, maxZ={z_max:.2f}m, imgs={n_img}, envX=[{x_min:.2f},{x_max:.2f}], envY=[{y_min:.2f},{y_max:.2f}], envZ=[{z_min:.2f},{z_max:.2f}])"
 
 
 def run_offline_vo(flight_dir: Path, env: dict):
@@ -404,6 +483,8 @@ def execute_single_attempt(flight_dir: Path, yaw_bin: str, motion_bin: str, env:
     px4_proc = None
     bridge_proc = None
     rec_proc = None
+    motion_retcode = 0
+    motion_timed_out = False
 
     try:
         # 1. Launch PX4 SITL
@@ -446,11 +527,8 @@ def execute_single_attempt(flight_dir: Path, yaw_bin: str, motion_bin: str, env:
 
         time.sleep(3.0)  # Flush buffer
 
-        if motion_timed_out:
-            return False, "Motion script timed out (>55s)"
-
     except subprocess.TimeoutExpired:
-        return False, "Motion script timed out (>55s)"
+        motion_timed_out = True
     except Exception as e:
         return False, f"Execution exception: {e}"
     finally:
@@ -466,7 +544,9 @@ def execute_single_attempt(flight_dir: Path, yaw_bin: str, motion_bin: str, env:
         kill_all()
 
     # Verify gates
-    ok, msg = verify_flight_data(flight_dir)
+    ok, msg = verify_flight_data(
+        flight_dir, motion_retcode=motion_retcode, motion_timed_out=motion_timed_out
+    )
     if not ok:
         return False, msg
 
