@@ -25,11 +25,13 @@ Execution Discipline:
 
 import argparse
 import collections
+import datetime
 import glob
 import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -306,6 +308,83 @@ def compute_flight_statistics(flight_dir: Path, yaw_bin: str, motion_bin: str):
     }
 
 
+def execute_motion_with_logging(flight_dir: Path, yaw_bin: str, motion_bin: str, env: dict, timeout: float = 55.0) -> tuple:
+    """Execute fly_sweep_motion.py, teeing stdout/stderr to motion.log and terminal,
+    prefixing [EVENT: ...] lines with ISO 8601 wall-clock timestamps, and recording start/exit/timeout.
+
+    Returns:
+        (returncode: int, timed_out: bool)
+    """
+    motion_script = str(REPO_ROOT / "scripts" / "fly_sweep_motion.py")
+    motion_log_path = flight_dir / "motion.log"
+    cmd = [
+        sys.executable, motion_script,
+        "--yaw-bin", yaw_bin,
+        "--motion-bin", motion_bin,
+        "--duration", "22.0",
+    ]
+
+    with open(motion_log_path, "w", encoding="utf-8") as mlog:
+        start_iso = datetime.datetime.now().astimezone().isoformat(timespec='milliseconds')
+        start_msg = f"=== [START] fly_sweep_motion.py starting at {start_iso} ===\n"
+        mlog.write(start_msg)
+        mlog.flush()
+        sys.stdout.write(start_msg)
+        sys.stdout.flush()
+
+        proc = subprocess.Popen(
+            cmd,
+            env=env,
+            cwd=str(REPO_ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+
+        def stream_output():
+            for raw_line in iter(proc.stdout.readline, ''):
+                if "[EVENT:" in raw_line:
+                    ts = datetime.datetime.now().astimezone().isoformat(timespec='milliseconds')
+                    formatted_line = f"{ts} {raw_line}"
+                else:
+                    formatted_line = raw_line
+                mlog.write(formatted_line)
+                mlog.flush()
+                sys.stdout.write(formatted_line)
+                sys.stdout.flush()
+            proc.stdout.close()
+
+        reader = threading.Thread(target=stream_output)
+        reader.daemon = True
+        reader.start()
+
+        timed_out = False
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            proc.kill()
+            to_iso = datetime.datetime.now().astimezone().isoformat(timespec='milliseconds')
+            to_msg = f"=== [TIMEOUT] fly_sweep_motion.py timed out (>{timeout:.0f}s) at {to_iso} ===\n"
+            mlog.write(to_msg)
+            mlog.flush()
+            sys.stdout.write(to_msg)
+            sys.stdout.flush()
+
+        reader.join(timeout=3.0)
+
+        end_iso = datetime.datetime.now().astimezone().isoformat(timespec='milliseconds')
+        rc = proc.returncode if proc.returncode is not None else -1
+        end_msg = f"=== [END] fly_sweep_motion.py exited (returncode={rc}) at {end_iso} ===\n"
+        mlog.write(end_msg)
+        mlog.flush()
+        sys.stdout.write(end_msg)
+        sys.stdout.flush()
+
+        return rc, timed_out
+
+
 def execute_single_attempt(flight_dir: Path, yaw_bin: str, motion_bin: str, env: dict) -> tuple:
     """Run PX4 SITL, ros_gz_bridge, recorder, and motion generator for one attempt."""
     kill_all()
@@ -361,15 +440,14 @@ def execute_single_attempt(flight_dir: Path, yaw_bin: str, motion_bin: str, env:
         time.sleep(2.0)
 
         # 5. Execute motion
-        motion_script = str(REPO_ROOT / "scripts" / "fly_sweep_motion.py")
-        motion_ret = subprocess.run([
-            sys.executable, motion_script,
-            "--yaw-bin", yaw_bin,
-            "--motion-bin", motion_bin,
-            "--duration", "22.0",
-        ], env=env, cwd=str(REPO_ROOT), timeout=55)
+        motion_retcode, motion_timed_out = execute_motion_with_logging(
+            flight_dir, yaw_bin, motion_bin, env, timeout=55.0
+        )
 
         time.sleep(3.0)  # Flush buffer
+
+        if motion_timed_out:
+            return False, "Motion script timed out (>55s)"
 
     except subprocess.TimeoutExpired:
         return False, "Motion script timed out (>55s)"
