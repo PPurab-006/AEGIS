@@ -406,6 +406,25 @@ def execute_single_attempt(flight_dir: Path, yaw_bin: str, motion_bin: str, env:
     return True, "SUCCESS"
 
 
+def preserve_attempt_directory(flight_dir: Path, attempt_num: int):
+    """Rename a failed or incomplete attempt directory to <flight_name>_attempt<N>.
+
+    Fails loudly with RuntimeError if the target directory already exists,
+    ensuring existing data is never silently overwritten.
+    """
+    if not flight_dir.exists():
+        return
+    flight_name = flight_dir.name
+    target_dir = flight_dir.parent / f"{flight_name}_attempt{attempt_num}"
+    if target_dir.exists():
+        raise RuntimeError(
+            f"Cannot preserve attempt {attempt_num} for '{flight_name}': "
+            f"target directory '{target_dir}' already exists! Aborting to prevent overwrite."
+        )
+    print(f"  [ARCHIVE] Renaming failed attempt {attempt_num} directory: {flight_dir.name} -> {target_dir.name}")
+    flight_dir.rename(target_dir)
+
+
 def run_flight(flight_name: str, yaw_bin: str, motion_bin: str, repeat: int, env: dict, log_records: list):
     """Execute flight with strict max-2-attempts discipline and logging."""
     flight_dir = DATASET_DIR / flight_name
@@ -441,7 +460,8 @@ def run_flight(flight_name: str, yaw_bin: str, motion_bin: str, repeat: int, env
     # Attempt 1
     print(f"  -> Attempt 1/2 for {flight_name}...")
     if flight_dir.exists():
-        shutil.rmtree(flight_dir)
+        prev_n = 2 if (flight_dir.parent / f"{flight_name}_attempt1").exists() else 1
+        preserve_attempt_directory(flight_dir, prev_n)
     flight_dir.mkdir(parents=True, exist_ok=True)
 
     ok1, msg1 = execute_single_attempt(flight_dir, yaw_bin, motion_bin, env)
@@ -468,13 +488,14 @@ def run_flight(flight_name: str, yaw_bin: str, motion_bin: str, repeat: int, env
         log_records.append(rec)
         return True
 
-    print(f"  [WARN] Attempt 1 FAILED: {msg1}. Cleaning up for Attempt 2 retry...")
+    print(f"  [WARN] Attempt 1 FAILED: {msg1}. Preserving Attempt 1 and cleaning up for Attempt 2 retry...")
+    preserve_attempt_directory(flight_dir, 1)
     time.sleep(2.0)
 
     # Attempt 2 (Strictly ONE retry with identical parameters)
     print(f"  -> Attempt 2/2 for {flight_name}...")
     if flight_dir.exists():
-        shutil.rmtree(flight_dir)
+        preserve_attempt_directory(flight_dir, 1)
     flight_dir.mkdir(parents=True, exist_ok=True)
 
     ok2, msg2 = execute_single_attempt(flight_dir, yaw_bin, motion_bin, env)
@@ -501,7 +522,8 @@ def run_flight(flight_name: str, yaw_bin: str, motion_bin: str, repeat: int, env
         return True
 
     # Both attempts failed
-    print(f"  [FAIL] Attempt 2 FAILED: {msg2}. Logging failed cell-repeat and moving on.")
+    print(f"  [FAIL] Attempt 2 FAILED: {msg2}. Preserving Attempt 2 and logging failed cell-repeat.")
+    preserve_attempt_directory(flight_dir, 2)
     rec = {
         "flight_name": flight_name,
         "cell": f"{yaw_bin}_{motion_bin}",
