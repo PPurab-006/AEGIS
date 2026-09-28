@@ -1,0 +1,130 @@
+# Research 2 — Phase 0 Configuration
+# This file is the single source of truth for every scoping decision locked
+# during planning. Scripts read from here — no magic numbers duplicated
+# in code. If a decision changes, change it here and re-run, don't patch
+# individual scripts.
+
+# ---------------------------------------------------------------------------
+# Source repo (R1 / VO_Research) — where the actual data lives
+# ---------------------------------------------------------------------------
+source_repo:
+  # Point this at your actual local VO_Research repo path.
+  local_path: "/home/purab/Purab/Projects/ROS"
+  datasets_subdir: "results/datasets"
+  # Provenance pin — the audit numbers below were computed against this
+  # commit. If source repo HEAD differs, the fetch script will warn you
+  # (not block you) so you know if data has moved since the audit.
+  expected_git_note: "Audited via scratch/audit_r2_inventory.py, output at results/reports/audits/research_2_data_inventory.md"
+
+# ---------------------------------------------------------------------------
+# Flight families included / excluded, and why
+# ---------------------------------------------------------------------------
+families:
+  core:
+    included: [F1, F2, F4, F5, F6, F9, F10, F11]
+  exploratory:
+    included: [F3, F7, F8]
+    excluded:
+      HOVER: >
+        Excluded entirely. 45% RAW active-window failure rate is confirmed
+        as a different phenomenon (startup/baseline feature starvation at
+        t≈0, before scene parallax is established), not the sustained
+        rotation-induced failure mode this research studies. Including it
+        would bias the model toward learning a t≈0 startup signature
+        instead of genuine rotation dynamics.
+
+# Run-directory naming patterns per family (mirrors R1 repo layout exactly)
+run_directories:
+  F1:  [p3_F1_L2_R1, p3_F1_L2_R2, p3_F1_L2_R3]
+  F2:  [p3_F2_L2_R1, p3_F2_L2_R2, p3_F2_L2_R3]
+  F4:  [p3_F4_L2_R1, p3_F4_L2_R2, p3_F4_L2_R3]
+  F5:  [phase2a_F5_L2_R1, phase2a_F5_L2_R2, phase2a_F5_L2_R3]
+  F6:  [p3_F6_L2_R1, p3_F6_L2_R2, p3_F6_L2_R3]
+  F9:  [phase2a_F9_L2_R1, phase2a_F9_L2_R2, phase2a_F9_L2_R3]
+  F10: [p3_F10_L3_R1, p3_F10_L3_R2, p3_F10_L3_R3]
+  F11: [p3_F11_L2_R1, p3_F11_L2_R2, p3_F11_L2_R3]
+  F3:  [p3x_F3_L2_R1, p3x_F3_L2_R2, p3x_F3_L2_R3]
+  F7:  [p3x_F7_L2_R1, p3x_F7_L2_R2, p3x_F7_L2_R3]
+  F8:  [p3x_F8_L2_R1, p3x_F8_L2_R2, p3x_F8_L2_R3]
+  # HOVER intentionally omitted — see exclusion note above
+
+# ---------------------------------------------------------------------------
+# Condition used for ground-truth labeling
+# ---------------------------------------------------------------------------
+labeling:
+  ground_truth_condition: "RAW"
+  ground_truth_file: "raw_vo.csv"
+  excluded_condition: "DELAYED-TRI"
+  excluded_condition_reason: >
+    DELAYED-TRI's 44-58% "failure" rates in F6/F9/F10 are the confirmed
+    zero-motion-fallback artifact (landmark triangulation deferral starves
+    pose inliers, causing stale/zero-motion pose output that inflates the
+    apparent failure count without representing genuine tracking loss).
+    Using DELAYED-TRI frames as failure labels would train the model to
+    predict a pipeline bug, not real rotation-induced degradation.
+
+  failure_definition:
+    rule: "num_inliers_pose < 8"
+    source: "Pipeline's own documented pose-update threshold (same definition used throughout R1, e.g. VFO and the core-matrix evaluation)."
+
+  active_window:
+    rule: "gt.pos_z >= 2.0"
+    rationale: >
+      Excludes takeoff/landing ground phases, consistent with R1's
+      active-window definition used in VFO and the phase3 evaluation.
+
+  # LOCKED DECISION — label horizon.
+  # Set during Phase 0 planning discussion; do not change without
+  # re-running the whole labeling step and re-validating against
+  # the audit numbers.
+  label_type: "forward_window"   # options: "single_frame" | "forward_window"
+  forward_window_frames: 5       # only used if label_type == "forward_window"
+  forward_window_frames_variants: [2, 3, 5]  # robustness check variants (Phase 1 v2)
+  label_type_rationale: >
+    Updated to forward_window (K=5 frames ≈ 165ms at 30.303 fps) per R1 VFO
+    lead-lag analysis findings: tracking failure is synchronous with rotation
+    rate spikes rather than preceded by a slow-building precursor, and single-frame
+    contemporaneous features crater ON failure frames (detecting failure rather
+    than predicting it). A 5-frame forward window predicts imminent failure
+    within the ~165ms horizon where R1 observed non-trivial correlation decay.
+
+# ---------------------------------------------------------------------------
+# Expected numbers (from the read-only audit) — validation checks the
+# fetch/labeling script against these to catch silent data drift or bugs.
+# Small deviations (~1-2%) are fine; large deviations mean something
+# changed and should stop the pipeline for review, not proceed silently.
+# ---------------------------------------------------------------------------
+expected_totals:
+  n_flights: 33
+  n_flights_note: >
+    24 core flights (8 families x 3 repeats) + 9 exploratory flights
+    (F3, F7, F8 x 3 repeats) = 33 flights. HOVER's 3 flights excluded.
+  active_frames_total_approx: 21948
+  active_failure_frames_approx: 1953
+  active_failure_rate_approx_pct: 8.9
+  tolerance_pct: 5.0  # warn if actual deviates from these by more than this
+
+# ---------------------------------------------------------------------------
+# Flight-level split (locked before any model touches this data)
+# ---------------------------------------------------------------------------
+split:
+  strategy: "flight_level_stratified"
+  rationale: >
+    Splitting must happen at the flight level, never the frame level.
+    Frames within one flight are temporally and spatially correlated;
+    frame-level random splitting would leak information between train
+    and test and produce an inflated, untrustworthy result.
+  test_fraction: 0.2
+  val_fraction: 0.2
+  # stratify roughly by family so held-out set isn't accidentally all
+  # low-failure-rate families
+  stratify_by: "family"
+  random_seed: 42
+  gt_discontinuity_flights_flagged:
+    - p3_F6_L2_R1
+    - p3_F6_L2_R3
+    - p3_F10_L3_R2
+  gt_discontinuity_note: >
+    These flights are NOT excluded, only flagged in the output manifest.
+    They may land in train, val, or test — their presence/absence in
+    each should be reported alongside any Phase 3 result for transparency.

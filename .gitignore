@@ -1,0 +1,14 @@
+# Local data cache pulled from the source VO_Research repo — never commit.
+# This is a working cache, re-fetchable any time via 01_fetch_data.py.
+# Committing it would duplicate R1's data and break the provenance chain
+# (this repo's git history should never be the source of truth for the
+# raw telemetry — VO_Research is).
+data/raw/
+data/processed/
+
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.venv/
+venv/
+*.egg-info/
