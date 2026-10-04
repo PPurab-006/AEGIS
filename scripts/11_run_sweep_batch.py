@@ -28,6 +28,7 @@ import collections
 import datetime
 import glob
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -38,6 +39,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy.spatial.transform import Rotation as R_scipy
+
+try:
+    from pyulog import ULog
+except ImportError:
+    ULog = None
 
 # ---------------------------------------------------------------------------
 # Paths and Environment Configuration
@@ -67,6 +73,22 @@ except ImportError:
 
 ENVELOPE_ALT_MIN = 0.5
 ENVELOPE_ALT_MAX = 5.0
+
+FAILSAFE_TARGETS = [
+    "Failsafe activated",
+    "Failsafe: blind land",
+    "invalid setpoints",
+]
+
+HEALTH_WARN_TARGETS = [
+    "Compass 0 fault",
+    "Compass needs calibration",
+    "Imbalanced propeller detected",
+    "Attitude failure",
+    "invalid setpoints",
+    "Failsafe: blind land",
+    "Failsafe activated",
+]
 
 YAW_BINS    = ["G", "M", "A", "E"]
 MOTION_BINS = ["C", "B", "S", "H"]
@@ -165,105 +187,313 @@ def wait_for_camera(env, timeout=75):
     return None
 
 
-def verify_flight_data(flight_dir: Path, motion_retcode: int = 0, motion_timed_out: bool = False):
-    """Verify basic, spatial envelope, PX4 failsafe, and motion script gates for raw recording."""
-    # Gate 3(c): Motion Script Exit & Timeout
-    if motion_timed_out:
-        return False, "Motion script gate failed: execution timed out (>55.0s)"
-    if motion_retcode != 0:
-        return False, f"Motion script gate failed: execution exited with non-zero code {motion_retcode}"
+def find_ulog_path(flight_dir: Path) -> Path | None:
+    """Find the PX4 ULog file corresponding to this flight attempt.
 
-    # Gate 3(c): Safety Abort in motion.log
-    motion_log_path = flight_dir / "motion.log"
-    if motion_log_path.exists():
+    Extracts the relative ULog path from px4_sitl.log ('Opened full log file: ./log/....ulg')
+    and searches the PX4 SITL rootfs and flight directories.
+    """
+    px4_log = flight_dir / "px4_sitl.log"
+    if not px4_log.exists():
+        return None
+    try:
+        text = px4_log.read_text(errors="replace")
+    except Exception:
+        return None
+    m = re.search(r"Opened full log file:\s*(\S+?\.ulg)", text)
+    if not m:
+        return None
+    rel = m.group(1).strip().lstrip("./")
+    px4_rootfs = Path(PX4_DIR) / "build" / "px4_sitl_default" / "rootfs"
+    cands = [
+        px4_rootfs / rel,
+        Path(PX4_DIR) / rel,
+        flight_dir / rel,
+        flight_dir / Path(rel).name,
+    ]
+    for c in cands:
+        if c.exists():
+            return c
+    return None
+
+
+def check_flight_gates(flight_dir: Path, motion_retcode: int = 0, motion_timed_out: bool = False) -> dict:
+    """Evaluate duration, spatial envelope, PX4 failsafe, motion script exit,
+    and post-arm health/failsafe warning gates for a flight attempt.
+
+    Returns dict containing status of all individual gates, combined_pass boolean,
+    and detailed diagnosis fields.
+    """
+    res = {
+        "gate_duration": "PASS",
+        "gate_envelope": "PASS",
+        "gate_failsafe": "PASS",
+        "gate_motion_exit": "PASS",
+        "gate_health_warn": "PASS",
+        "health_warnings_fired": "",
+        "arming_time_s": "",
+        "first_tilt_exceed_45_s": "",
+        "pre_arm_notes": "",
+        "combined_pass": True,
+        "fail_reasons": [],
+    }
+
+    # 1. Motion script exit gate 3(c)
+    motion_log = flight_dir / "motion.log"
+    if motion_timed_out:
+        res["gate_motion_exit"] = "FAIL"
+        res["fail_reasons"].append("Motion script gate failed: execution timed out (>55.0s)")
+    elif motion_retcode != 0:
+        res["gate_motion_exit"] = "FAIL"
+        res["fail_reasons"].append(f"Motion script gate failed: execution exited with code {motion_retcode}")
+    elif motion_log.exists():
         try:
-            with open(motion_log_path, "r", errors="replace") as f:
+            with open(motion_log, "r", errors="replace") as f:
                 for line in f:
                     if "[EVENT: SAFETY_ABORT]" in line:
-                        return False, f"Motion script gate failed: safety abort detected in motion.log ({line.strip()})"
+                        res["gate_motion_exit"] = "FAIL"
+                        res["fail_reasons"].append(f"Motion script gate failed: safety abort in motion.log ({line.strip()})")
+                        break
         except Exception as e:
             print(f"  [WARN] Failed to read motion.log: {e}")
+    else:
+        res["gate_motion_exit"] = "n/a (no motion.log)"
 
-    gt_path  = flight_dir / "dataset_gt.csv"
+    # 2. Dataset files, duration, and envelope gate 3(a)
+    gt_path = flight_dir / "dataset_gt.csv"
     cam_path = flight_dir / "camera_frames.csv"
-    img_dir  = flight_dir / "images"
+    img_dir = flight_dir / "images"
+    df_gt = None
+    act_idx = []
 
     if not gt_path.exists() or not cam_path.exists() or not img_dir.exists():
-        return False, "Missing dataset_gt.csv, camera_frames.csv, or images/"
-
-    try:
-        df_gt  = pd.read_csv(gt_path)
-        df_cam = pd.read_csv(cam_path)
-    except Exception as e:
-        return False, f"CSV read error: {e}"
-
-    if len(df_gt) < 100:
-        return False, f"Insufficient GT rows: {len(df_gt)}"
-    if len(df_cam) < 100:
-        return False, f"Insufficient camera rows: {len(df_cam)}"
-
-    t = df_gt["timestamp_total_sec"].values.astype(float)
-    z = df_gt["pos_z"].values.astype(float)
-    act_idx = np.where(z >= 2.0)[0]
-    if len(act_idx) < 10:
-        return False, "Vehicle never reached 2.0m cruise altitude"
-
-    dur = float(t[act_idx[-1]] - t[act_idx[0]])
-    if dur < 18.0:
-        return False, f"Active duration gate failed: {dur:.2f}s < 18.0s threshold"
-
-    n_img = len(list(img_dir.glob("*.png")))
-    if n_img < len(df_cam) - 10:
-        return False, f"Image drop: {n_img} PNGs vs {len(df_cam)} cam rows"
-
-    # Gate 3(a): Spatial Envelope
-    # Convert GT world positions to local frame using spawn origin:
-    # local_x = pos_x - SPAWN_X0, local_y = pos_y - SPAWN_Y0, alt = pos_z
-    x_local = df_gt["pos_x"].values[act_idx] - SPAWN_X0
-    y_local = df_gt["pos_y"].values[act_idx] - SPAWN_Y0
-    z_act   = z[act_idx]
-    t_act   = t[act_idx]
-
-    x_min, x_max = float(x_local.min()), float(x_local.max())
-    y_min, y_max = float(y_local.min()), float(y_local.max())
-    z_min, z_max = float(z_act.min()), float(z_act.max())
-
-    out_of_bounds = (
-        (x_local < LOCAL_X_MIN) | (x_local > LOCAL_X_MAX) |
-        (y_local < LOCAL_Y_MIN) | (y_local > LOCAL_Y_MAX) |
-        (z_act < ENVELOPE_ALT_MIN) | (z_act > ENVELOPE_ALT_MAX)
-    )
-    if np.any(out_of_bounds):
-        first_viol_idx = int(np.where(out_of_bounds)[0][0])
-        t_viol = float(t_act[first_viol_idx])
-        x_viol = float(x_local[first_viol_idx])
-        y_viol = float(y_local[first_viol_idx])
-        z_viol = float(z_act[first_viol_idx])
-        return False, (
-            f"Envelope gate failed: breach at t={t_viol:.2f}s "
-            f"(first violation: local X={x_viol:.2f}m in [{LOCAL_X_MIN},{LOCAL_X_MAX}], "
-            f"Y={y_viol:.2f}m in [{LOCAL_Y_MIN},{LOCAL_Y_MAX}], Alt={z_viol:.2f}m in [{ENVELOPE_ALT_MIN},{ENVELOPE_ALT_MAX}]; "
-            f"measured ranges: X=[{x_min:.2f},{x_max:.2f}], Y=[{y_min:.2f},{y_max:.2f}], Alt=[{z_min:.2f},{z_max:.2f}])"
-        )
-
-    # Gate 3(b): PX4 Failsafe
-    px4_log_path = flight_dir / "px4_sitl.log"
-    if px4_log_path.exists():
-        failsafe_targets = ["Failsafe activated", "Failsafe: blind land", "invalid setpoints"]
-        found_failsafes = []
+        res["gate_duration"] = "FAIL"
+        res["gate_envelope"] = "FAIL"
+        res["fail_reasons"].append("Missing dataset_gt.csv, camera_frames.csv, or images/")
+    else:
         try:
-            with open(px4_log_path, "r", errors="replace") as f:
+            df_gt = pd.read_csv(gt_path)
+            df_cam = pd.read_csv(cam_path)
+        except Exception as e:
+            res["gate_duration"] = "FAIL"
+            res["gate_envelope"] = "FAIL"
+            res["fail_reasons"].append(f"CSV read error: {e}")
+            df_gt = None
+
+        if df_gt is not None:
+            if len(df_gt) < 100:
+                res["gate_duration"] = "FAIL"
+                res["fail_reasons"].append(f"Insufficient GT rows: {len(df_gt)}")
+            if len(df_cam) < 100:
+                res["gate_duration"] = "FAIL"
+                res["fail_reasons"].append(f"Insufficient camera rows: {len(df_cam)}")
+
+            t = df_gt["timestamp_total_sec"].values.astype(float)
+            z = df_gt["pos_z"].values.astype(float)
+            act_idx = np.where(z >= 2.0)[0]
+            if len(act_idx) < 10:
+                res["gate_duration"] = "FAIL"
+                res["fail_reasons"].append("Vehicle never reached 2.0m cruise altitude")
+            else:
+                dur = float(t[act_idx[-1]] - t[act_idx[0]])
+                if dur < 18.0:
+                    res["gate_duration"] = "FAIL"
+                    res["fail_reasons"].append(f"Active duration gate failed: {dur:.2f}s < 18.0s threshold")
+
+            n_img = len(list(img_dir.glob("*.png")))
+            if n_img < len(df_cam) - 10:
+                res["gate_duration"] = "FAIL"
+                res["fail_reasons"].append(f"Image drop: {n_img} PNGs vs {len(df_cam)} cam rows")
+
+            # Spatial Envelope in local frame
+            if len(act_idx) > 0:
+                x_local = df_gt["pos_x"].values[act_idx] - SPAWN_X0
+                y_local = df_gt["pos_y"].values[act_idx] - SPAWN_Y0
+                z_act = z[act_idx]
+                t_act = t[act_idx]
+
+                x_min, x_max = float(x_local.min()), float(x_local.max())
+                y_min, y_max = float(y_local.min()), float(y_local.max())
+                z_min, z_max = float(z_act.min()), float(z_act.max())
+
+                out_of_bounds = (
+                    (x_local < LOCAL_X_MIN) | (x_local > LOCAL_X_MAX) |
+                    (y_local < LOCAL_Y_MIN) | (y_local > LOCAL_Y_MAX) |
+                    (z_act < ENVELOPE_ALT_MIN) | (z_act > ENVELOPE_ALT_MAX)
+                )
+                if np.any(out_of_bounds):
+                    first_viol_idx = int(np.where(out_of_bounds)[0][0])
+                    t_viol = float(t_act[first_viol_idx])
+                    x_viol = float(x_local[first_viol_idx])
+                    y_viol = float(y_local[first_viol_idx])
+                    z_viol = float(z_act[first_viol_idx])
+                    res["gate_envelope"] = "FAIL"
+                    res["fail_reasons"].append(
+                        f"Envelope gate failed: breach at t={t_viol:.2f}s "
+                        f"(local X={x_viol:.2f}m in [{LOCAL_X_MIN},{LOCAL_X_MAX}], "
+                        f"Y={y_viol:.2f}m in [{LOCAL_Y_MIN},{LOCAL_Y_MAX}], Alt={z_viol:.2f}m in [{ENVELOPE_ALT_MIN},{ENVELOPE_ALT_MAX}])"
+                    )
+            else:
+                res["gate_envelope"] = "FAIL"
+                res["fail_reasons"].append("Envelope gate failed: no active samples")
+
+    # 3. PX4 failsafe gate 3(b) from px4_sitl.log
+    px4_log = flight_dir / "px4_sitl.log"
+    found_failsafes = []
+    if px4_log.exists():
+        try:
+            with open(px4_log, "r", errors="replace") as f:
                 for line in f:
-                    for target in failsafe_targets:
+                    for target in FAILSAFE_TARGETS:
                         if target in line:
                             found_failsafes.append(line.strip())
                             break
         except Exception as e:
             print(f"  [WARN] Failed to read px4_sitl.log: {e}")
         if found_failsafes:
-            return False, f"PX4 failsafe gate failed: found {len(found_failsafes)} event(s) in px4_sitl.log ({'; '.join(found_failsafes)})"
+            res["gate_failsafe"] = "FAIL"
+            res["fail_reasons"].append(f"PX4 failsafe gate failed: found {len(found_failsafes)} event(s) ({'; '.join(found_failsafes)})")
 
-    return True, f"PASS (dur={dur:.1f}s, maxZ={z_max:.2f}m, imgs={n_img}, envX=[{x_min:.2f},{x_max:.2f}], envY=[{y_min:.2f},{y_max:.2f}], envZ=[{z_min:.2f},{z_max:.2f}])"
+    # 4. New Gate: Health & Failsafe Warnings from ULog
+    ulog_path = find_ulog_path(flight_dir)
+    ulog_obj = None
+    if ulog_path is not None and ULog is not None:
+        try:
+            ulog_obj = ULog(str(ulog_path))
+        except Exception as e:
+            ulog_obj = None
+
+    post_arm_warns = []
+    pre_notes = []
+    t_arm = None
+    t_disarm = None
+
+    if ulog_obj is not None:
+        for msg in ulog_obj.logged_messages:
+            text = msg.message
+            ts = msg.timestamp / 1e6
+            if "Armed by external command" in text:
+                t_arm = ts
+            elif "Disarmed" in text:
+                t_disarm = ts
+
+        # Also capture pre-arm notes from px4_sitl.log boot messages if logger opened late
+        if px4_log.exists():
+            try:
+                for line in px4_log.read_text(errors="replace").splitlines():
+                    if "Armed by external command" in line:
+                        break
+                    if "Preflight Fail: system power unavailable" in line:
+                        if "Preflight Fail: system power unavailable" not in pre_notes:
+                            pre_notes.append("Preflight Fail: system power unavailable")
+            except Exception:
+                pass
+
+        for msg in ulog_obj.logged_messages:
+            ts = msg.timestamp / 1e6
+            text = msg.message.strip()
+
+            matched = False
+            for w in HEALTH_WARN_TARGETS:
+                if w in text:
+                    matched = True
+                    break
+            if not matched and "Preflight Fail:" in text:
+                matched = True
+
+            if matched:
+                if t_arm is not None and ts >= t_arm and (t_disarm is None or ts <= t_disarm):
+                    post_arm_warns.append((ts, text))
+                elif t_arm is None or ts < t_arm:
+                    if "system power unavailable" in text:
+                        if text not in pre_notes:
+                            pre_notes.append(text)
+
+        if post_arm_warns:
+            res["gate_health_warn"] = "FAIL"
+            warn_strs = [f"{ts:.3f}s: {txt}" for ts, txt in post_arm_warns]
+            res["health_warnings_fired"] = "; ".join(warn_strs)
+            res["fail_reasons"].append(f"Health/failsafe warning gate failed: {warn_strs[0]}")
+        else:
+            res["gate_health_warn"] = "PASS"
+
+    else:
+        # Fallback to px4_sitl.log matching
+        if px4_log.exists():
+            after_arm = False
+            try:
+                for line in px4_log.read_text(errors="replace").splitlines():
+                    if "Armed by external command" in line:
+                        after_arm = True
+                        continue
+                    if not after_arm:
+                        if "Preflight Fail: system power unavailable" in line:
+                            if "Preflight Fail: system power unavailable" not in pre_notes:
+                                pre_notes.append("Preflight Fail: system power unavailable")
+                    else:
+                        matched = False
+                        for w in HEALTH_WARN_TARGETS:
+                            if w in line:
+                                matched = True
+                                break
+                        if not matched and "Preflight Fail:" in line:
+                            matched = True
+                        if matched:
+                            post_arm_warns.append((None, line.strip()))
+            except Exception:
+                pass
+
+            if post_arm_warns:
+                res["gate_health_warn"] = "FAIL"
+                warn_strs = [f"fallback: {txt}" for _, txt in post_arm_warns]
+                res["health_warnings_fired"] = "; ".join(warn_strs)
+                res["fail_reasons"].append(f"Health/failsafe warning gate failed (fallback): {warn_strs[0]}")
+            else:
+                res["gate_health_warn"] = "unverifiable-fallback"
+        else:
+            res["gate_health_warn"] = "unverifiable-fallback"
+
+    res["arming_time_s"] = round(t_arm, 3) if t_arm is not None else ""
+    res["pre_arm_notes"] = "; ".join(pre_notes)
+
+    # Combined pass/fail decision
+    active_gates_failed = (
+        res["gate_duration"] == "FAIL" or
+        res["gate_envelope"] == "FAIL" or
+        res["gate_failsafe"] == "FAIL" or
+        res["gate_motion_exit"] == "FAIL" or
+        res["gate_health_warn"] == "FAIL"
+    )
+    res["combined_pass"] = not active_gates_failed
+
+    # For a failed attempt, record the first time tilt exceeded 45 deg
+    if not res["combined_pass"] and df_gt is not None:
+        try:
+            quats = df_gt[["rot_x", "rot_y", "rot_z", "rot_w"]].values
+            rots = R_scipy.from_quat(quats)
+            body_z_world = rots.apply([0, 0, 1])
+            z_comp = np.clip(body_z_world[:, 2], -1.0, 1.0)
+            tilt_deg = np.rad2deg(np.arccos(z_comp))
+            t_gt = df_gt["timestamp_total_sec"].values.astype(float)
+            mask = (tilt_deg > 45.0)
+            if t_arm is not None:
+                mask &= (t_gt >= t_arm)
+            idx_45 = np.where(mask)[0]
+            if len(idx_45) > 0:
+                res["first_tilt_exceed_45_s"] = round(float(t_gt[idx_45[0]]), 3)
+        except Exception as e:
+            print(f"  [WARN] Failed to compute tilt: {e}")
+
+    return res
+
+
+def verify_flight_data(flight_dir: Path, motion_retcode: int = 0, motion_timed_out: bool = False) -> tuple:
+    """Verify all flight gates. Returns (ok: bool, msg: str, gate_res: dict)."""
+    gate_res = check_flight_gates(flight_dir, motion_retcode=motion_retcode, motion_timed_out=motion_timed_out)
+    if not gate_res["combined_pass"]:
+        msg = "; ".join(gate_res["fail_reasons"])
+        return False, msg, gate_res
+    return True, "SUCCESS", gate_res
 
 
 def run_offline_vo(flight_dir: Path, env: dict):
@@ -472,7 +702,7 @@ def execute_single_attempt(flight_dir: Path, yaw_bin: str, motion_bin: str, env:
     agri = ROS_REPO / "configs" / "gazebo_models_worlds_collection-master" / "worlds" / "agriculture.world"
     dsdf = Path(PX4_DIR) / "Tools" / "simulation" / "gz" / "worlds" / "default.sdf"
     if not agri.exists():
-        return False, "agriculture.world not found"
+        return False, "agriculture.world not found", {}
     subprocess.run(["ln", "-sf", str(agri), str(dsdf)], check=True)
 
     flight_dir.mkdir(parents=True, exist_ok=True)
@@ -496,7 +726,7 @@ def execute_single_attempt(flight_dir: Path, yaw_bin: str, motion_bin: str, env:
         # 2. Wait for camera topic
         world = wait_for_camera(env, timeout=75)
         if world is None:
-            return False, "Camera topic timeout in Gazebo"
+            return False, "Camera topic timeout in Gazebo", {}
 
         # 3. Launch ros_gz_bridge
         bridge_proc = subprocess.Popen([
@@ -530,7 +760,7 @@ def execute_single_attempt(flight_dir: Path, yaw_bin: str, motion_bin: str, env:
     except subprocess.TimeoutExpired:
         motion_timed_out = True
     except Exception as e:
-        return False, f"Execution exception: {e}"
+        return False, f"Execution exception: {e}", {}
     finally:
         for p, n in [(rec_proc, "recorder"), (bridge_proc, "bridge"), (px4_proc, "px4")]:
             if p and p.poll() is None:
@@ -544,24 +774,24 @@ def execute_single_attempt(flight_dir: Path, yaw_bin: str, motion_bin: str, env:
         kill_all()
 
     # Verify gates
-    ok, msg = verify_flight_data(
+    ok, msg, gate_res = verify_flight_data(
         flight_dir, motion_retcode=motion_retcode, motion_timed_out=motion_timed_out
     )
     if not ok:
-        return False, msg
+        return False, msg, gate_res
 
     # Run VO
     try:
         run_offline_vo(flight_dir, env)
     except Exception as e:
-        return False, f"Offline VO failure: {e}"
+        return False, f"Offline VO failure: {e}", gate_res
 
     # Verify schema
     ok_sch, msg_sch = verify_schema(flight_dir)
     if not ok_sch:
-        return False, f"Schema mismatch: {msg_sch}"
+        return False, f"Schema mismatch: {msg_sch}", gate_res
 
-    return True, "SUCCESS"
+    return True, "SUCCESS", gate_res
 
 
 def preserve_attempt_directory(flight_dir: Path, attempt_num: int):
@@ -583,7 +813,15 @@ def preserve_attempt_directory(flight_dir: Path, attempt_num: int):
     flight_dir.rename(target_dir)
 
 
-def run_flight(flight_name: str, yaw_bin: str, motion_bin: str, repeat: int, env: dict, log_records: list):
+def run_flight(
+    flight_name: str,
+    yaw_bin: str,
+    motion_bin: str,
+    repeat: int,
+    env: dict,
+    log_records: list,
+    execute_attempt_fn=execute_single_attempt,
+):
     """Execute flight with strict max-2-attempts discipline and logging."""
     flight_dir = DATASET_DIR / flight_name
     r2_raw_dir = R2_RAW_DIR / flight_name
@@ -595,7 +833,7 @@ def run_flight(flight_name: str, yaw_bin: str, motion_bin: str, repeat: int, env
 
     # Check if already completed (supports resuming)
     if flight_dir.exists() and (flight_dir / "raw_vo.csv").exists():
-        ok, msg = verify_flight_data(flight_dir)
+        ok, msg, gate_res = verify_flight_data(flight_dir)
         ok_sch, _ = verify_schema(flight_dir)
         if ok and ok_sch:
             print(f"  [RESUME] Found existing verified dataset for {flight_name}. Skipping re-flight.")
@@ -610,102 +848,126 @@ def run_flight(flight_name: str, yaw_bin: str, motion_bin: str, repeat: int, env
                 "status": "PASS",
                 "fail_reason": "",
                 "commanded_yaw_rate": commanded_yaw,
-                **stats
+                "gate_duration": gate_res.get("gate_duration", "PASS"),
+                "gate_envelope": gate_res.get("gate_envelope", "PASS"),
+                "gate_failsafe": gate_res.get("gate_failsafe", "PASS"),
+                "gate_motion_exit": gate_res.get("gate_motion_exit", "PASS"),
+                "gate_health_warn": gate_res.get("gate_health_warn", "PASS"),
+                "health_warnings_fired": gate_res.get("health_warnings_fired", ""),
+                "arming_time_s": gate_res.get("arming_time_s", ""),
+                "first_tilt_exceed_45_s": gate_res.get("first_tilt_exceed_45_s", ""),
+                "pre_arm_notes": gate_res.get("pre_arm_notes", ""),
+                **stats,
             }
             log_records.append(rec)
             return True
 
-    # Attempt 1
-    print(f"  -> Attempt 1/2 for {flight_name}...")
+    # If flight_dir exists from an unverified/aborted previous run, archive it to avoid clobbering
     if flight_dir.exists():
-        prev_n = 2 if (flight_dir.parent / f"{flight_name}_attempt1").exists() else 1
-        preserve_attempt_directory(flight_dir, prev_n)
-    flight_dir.mkdir(parents=True, exist_ok=True)
+        arch_n = 1
+        while (flight_dir.parent / f"{flight_name}_attempt{arch_n}").exists():
+            arch_n += 1
+        preserve_attempt_directory(flight_dir, arch_n)
 
-    ok1, msg1 = execute_single_attempt(flight_dir, yaw_bin, motion_bin, env)
+    max_attempts = 2
+    attempt_history = []
+    last_gate_res = {}
 
-    if ok1:
-        print(f"  -> Attempt 1 SUCCESS for {flight_name}!")
-        stats = compute_flight_statistics(flight_dir, yaw_bin, motion_bin)
-        # Mirror to Research2 data/raw
-        r2_raw_dir.mkdir(parents=True, exist_ok=True)
-        for fn in ["raw_vo.csv", "dataset_gt.csv", "camera_frames.csv"]:
-            shutil.copy2(flight_dir / fn, r2_raw_dir / fn)
-        rec = {
-            "flight_name": flight_name,
-            "cell": f"{yaw_bin}_{motion_bin}",
-            "yaw_bin": yaw_bin,
-            "motion_bin": motion_bin,
-            "repeat": repeat,
-            "attempts_used": 1,
-            "status": "PASS",
-            "fail_reason": "",
-            "commanded_yaw_rate": commanded_yaw,
-            **stats
-        }
-        log_records.append(rec)
-        return True
+    for attempt in range(1, max_attempts + 1):
+        print(f"  -> Attempt {attempt}/{max_attempts} for {flight_name}...")
+        flight_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"  [WARN] Attempt 1 FAILED: {msg1}. Preserving Attempt 1 and cleaning up for Attempt 2 retry...")
-    preserve_attempt_directory(flight_dir, 1)
-    time.sleep(2.0)
+        ok, msg, gate_res = execute_attempt_fn(flight_dir, yaw_bin, motion_bin, env)
+        attempt_history.append((attempt, ok, msg, gate_res))
+        last_gate_res = gate_res
 
-    # Attempt 2 (Strictly ONE retry with identical parameters)
-    print(f"  -> Attempt 2/2 for {flight_name}...")
-    if flight_dir.exists():
-        preserve_attempt_directory(flight_dir, 1)
-    flight_dir.mkdir(parents=True, exist_ok=True)
+        if ok:
+            print(f"  -> Attempt {attempt} SUCCESS for {flight_name}!")
+            stats = compute_flight_statistics(flight_dir, yaw_bin, motion_bin)
+            r2_raw_dir.mkdir(parents=True, exist_ok=True)
+            for fn in ["raw_vo.csv", "dataset_gt.csv", "camera_frames.csv"]:
+                shutil.copy2(flight_dir / fn, r2_raw_dir / fn)
 
-    ok2, msg2 = execute_single_attempt(flight_dir, yaw_bin, motion_bin, env)
+            fail_reason = "" if attempt == 1 else f"Attempt 1 failed ({attempt_history[0][2]})"
+            rec = {
+                "flight_name": flight_name,
+                "cell": f"{yaw_bin}_{motion_bin}",
+                "yaw_bin": yaw_bin,
+                "motion_bin": motion_bin,
+                "repeat": repeat,
+                "attempts_used": attempt,
+                "status": "PASS",
+                "fail_reason": fail_reason,
+                "commanded_yaw_rate": commanded_yaw,
+                "gate_duration": gate_res.get("gate_duration", "PASS"),
+                "gate_envelope": gate_res.get("gate_envelope", "PASS"),
+                "gate_failsafe": gate_res.get("gate_failsafe", "PASS"),
+                "gate_motion_exit": gate_res.get("gate_motion_exit", "PASS"),
+                "gate_health_warn": gate_res.get("gate_health_warn", "PASS"),
+                "health_warnings_fired": gate_res.get("health_warnings_fired", ""),
+                "arming_time_s": gate_res.get("arming_time_s", ""),
+                "first_tilt_exceed_45_s": gate_res.get("first_tilt_exceed_45_s", ""),
+                "pre_arm_notes": gate_res.get("pre_arm_notes", ""),
+                **stats,
+            }
+            log_records.append(rec)
+            return True
 
-    if ok2:
-        print(f"  -> Attempt 2 SUCCESS for {flight_name}!")
-        stats = compute_flight_statistics(flight_dir, yaw_bin, motion_bin)
-        r2_raw_dir.mkdir(parents=True, exist_ok=True)
-        for fn in ["raw_vo.csv", "dataset_gt.csv", "camera_frames.csv"]:
-            shutil.copy2(flight_dir / fn, r2_raw_dir / fn)
-        rec = {
-            "flight_name": flight_name,
-            "cell": f"{yaw_bin}_{motion_bin}",
-            "yaw_bin": yaw_bin,
-            "motion_bin": motion_bin,
-            "repeat": repeat,
-            "attempts_used": 2,
-            "status": "PASS",
-            "fail_reason": f"Attempt 1 failed ({msg1})",
-            "commanded_yaw_rate": commanded_yaw,
-            **stats
-        }
-        log_records.append(rec)
-        return True
+        # Attempt failed
+        if attempt < max_attempts:
+            print(f"  [WARN] Attempt {attempt} FAILED: {msg}. Preserving Attempt {attempt} and cleaning up for Attempt {attempt + 1} retry...")
+            preserve_attempt_directory(flight_dir, attempt)
+            time.sleep(2.0)
+        else:
+            # Final failed attempt keeps the plain flight dir name
+            print(f"  [FAIL] Attempt {attempt} FAILED: {msg}. Final attempt failed; keeping plain directory name {flight_dir.name}.")
 
     # Both attempts failed
-    print(f"  [FAIL] Attempt 2 FAILED: {msg2}. Preserving Attempt 2 and logging failed cell-repeat.")
-    preserve_attempt_directory(flight_dir, 2)
+    stats = {}
+    if (flight_dir / "raw_vo.csv").exists() and (flight_dir / "dataset_gt.csv").exists():
+        try:
+            stats = compute_flight_statistics(flight_dir, yaw_bin, motion_bin)
+        except Exception:
+            pass
+    if not stats:
+        stats = {
+            "active_duration_s": 0.0,
+            "active_frames": 0,
+            "naive_failure_frames": 0,
+            "naive_failure_rate_pct": 0.0,
+            "achieved_mean_yaw_rate": 0.0,
+            "achieved_median_yaw_rate": 0.0,
+            "achieved_max_yaw_rate": 0.0,
+            "mean_feature_vel": 0.0,
+            "min_feature_vel": 0.0,
+            "max_feature_vel": 0.0,
+            "motion_window_mean_vel": 0.0,
+            "motion_window_min_vel": 0.0,
+            "motion_window_max_vel": 0.0,
+            "cruise_window_mean_vel": 0.0,
+        }
+
+    fail_reasons = " | ".join([f"Att{att}: {m}" for att, _, m, _ in attempt_history])
     rec = {
         "flight_name": flight_name,
         "cell": f"{yaw_bin}_{motion_bin}",
         "yaw_bin": yaw_bin,
         "motion_bin": motion_bin,
         "repeat": repeat,
-        "attempts_used": 2,
+        "attempts_used": max_attempts,
         "status": "FAIL",
-        "fail_reason": f"Att1: {msg1} | Att2: {msg2}",
+        "fail_reason": fail_reasons,
         "commanded_yaw_rate": commanded_yaw,
-        "active_duration_s": 0.0,
-        "active_frames": 0,
-        "naive_failure_frames": 0,
-        "naive_failure_rate_pct": 0.0,
-        "achieved_mean_yaw_rate": 0.0,
-        "achieved_median_yaw_rate": 0.0,
-        "achieved_max_yaw_rate": 0.0,
-        "mean_feature_vel": 0.0,
-        "min_feature_vel": 0.0,
-        "max_feature_vel": 0.0,
-        "motion_window_mean_vel": 0.0,
-        "motion_window_min_vel": 0.0,
-        "motion_window_max_vel": 0.0,
-        "cruise_window_mean_vel": 0.0,
+        "gate_duration": last_gate_res.get("gate_duration", "FAIL"),
+        "gate_envelope": last_gate_res.get("gate_envelope", "FAIL"),
+        "gate_failsafe": last_gate_res.get("gate_failsafe", "FAIL"),
+        "gate_motion_exit": last_gate_res.get("gate_motion_exit", "FAIL"),
+        "gate_health_warn": last_gate_res.get("gate_health_warn", "FAIL"),
+        "health_warnings_fired": last_gate_res.get("health_warnings_fired", ""),
+        "arming_time_s": last_gate_res.get("arming_time_s", ""),
+        "first_tilt_exceed_45_s": last_gate_res.get("first_tilt_exceed_45_s", ""),
+        "pre_arm_notes": last_gate_res.get("pre_arm_notes", ""),
+        **stats,
     }
     log_records.append(rec)
     return False

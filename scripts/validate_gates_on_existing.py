@@ -2,14 +2,20 @@
 """
 scripts/validate_gates_on_existing.py
 
-Dry-run validation tool to apply verification gates 3(a) and 3(b)
-to all existing flight directories under results/datasets (or data/raw).
+Dry-run validation tool to apply verification gates to all existing
+flight directories under results/datasets (or data/raw).
 
 Gates evaluated:
   - Duration gate: active window (pos_z >= 2.0) duration >= 18.0s
   - Envelope gate 3(a): active window local X in [-20, 20], local Y in [-25, 25], Alt in [0.5, 5.0]
   - PX4 failsafe gate 3(b): px4_sitl.log contains 'Failsafe activated', 'Failsafe: blind land', or 'invalid setpoints'
   - Motion script gate 3(c): reported as 'n/a (no motion.log)' for historical data
+  - Health/failsafe warning gate: parse attempt's ULog (with px4_sitl.log fallback) for:
+      "Compass 0 fault", "Compass needs calibration", "Imbalanced propeller detected",
+      "Attitude failure", any "Preflight Fail:" post-arm, "invalid setpoints",
+      "Failsafe: blind land", "Failsafe activated" between arming and disarm/end.
+      Pre-arm "Preflight Fail: system power unavailable" recorded as note only.
+      Records first tilt > 45 deg for failed attempts.
 
 Excludes any *_attempt<N> archive directories from flight enumeration.
 """
@@ -20,9 +26,17 @@ import sys
 from pathlib import Path
 import numpy as np
 import pandas as pd
+from scipy.spatial.transform import Rotation as R_scipy
+
+try:
+    from pyulog import ULog
+except ImportError:
+    ULog = None
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
+
+PX4_DIR = os.environ.get("PX4_DIR", str(Path.home() / "PX4-Autopilot"))
 
 # Import constants from 11_run_sweep_batch / fly_sweep_motion
 try:
@@ -43,6 +57,16 @@ FAILSAFE_TARGETS = [
     "Failsafe activated",
     "Failsafe: blind land",
     "invalid setpoints",
+]
+
+HEALTH_WARN_TARGETS = [
+    "Compass 0 fault",
+    "Compass needs calibration",
+    "Imbalanced propeller detected",
+    "Attitude failure",
+    "invalid setpoints",
+    "Failsafe: blind land",
+    "Failsafe activated",
 ]
 
 
@@ -73,6 +97,31 @@ def load_flight_log_attempts() -> dict:
     return attempts
 
 
+def find_ulog_path(flight_dir: Path) -> Path | None:
+    px4_log = flight_dir / "px4_sitl.log"
+    if not px4_log.exists():
+        return None
+    try:
+        text = px4_log.read_text(errors="replace")
+    except Exception:
+        return None
+    m = re.search(r"Opened full log file:\s*(\S+?\.ulg)", text)
+    if not m:
+        return None
+    rel = m.group(1).strip().lstrip("./")
+    px4_rootfs = Path(PX4_DIR) / "build" / "px4_sitl_default" / "rootfs"
+    cands = [
+        px4_rootfs / rel,
+        Path(PX4_DIR) / rel,
+        flight_dir / rel,
+        flight_dir / Path(rel).name,
+    ]
+    for c in cands:
+        if c.exists():
+            return c
+    return None
+
+
 def evaluate_flight(flight_dir: Path, attempt_num: int) -> dict:
     result = {
         "flight": flight_dir.name,
@@ -81,63 +130,66 @@ def evaluate_flight(flight_dir: Path, attempt_num: int) -> dict:
         "envelope_gate": "ERROR",
         "failsafe_gate": "ERROR",
         "motion_gate": "n/a (no motion.log)",
+        "warn_gate": "ERROR",
+        "warnings_or_notes": "-",
+        "first_tilt_45": "-",
         "first_envelope_viol": "-",
         "failsafe_lines": "-",
     }
 
     gt_path = flight_dir / "dataset_gt.csv"
+    df_gt = None
     if not gt_path.exists():
         result["duration_gate"] = "FAIL (no GT)"
         result["envelope_gate"] = "FAIL (no GT)"
-        return result
-
-    try:
-        df_gt = pd.read_csv(gt_path)
-    except Exception as e:
-        result["duration_gate"] = f"FAIL (read err: {e})"
-        result["envelope_gate"] = f"FAIL (read err: {e})"
-        return result
-
-    t = df_gt["timestamp_total_sec"].values.astype(float)
-    z = df_gt["pos_z"].values.astype(float)
-    act_idx = np.where(z >= 2.0)[0]
-
-    # Duration gate
-    if len(act_idx) < 10:
-        result["duration_gate"] = "FAIL (never reached 2.0m)"
-        dur = 0.0
     else:
-        dur = float(t[act_idx[-1]] - t[act_idx[0]])
-        if dur >= 18.0:
-            result["duration_gate"] = f"PASS ({dur:.1f}s)"
-        else:
-            result["duration_gate"] = f"FAIL ({dur:.1f}s < 18s)"
+        try:
+            df_gt = pd.read_csv(gt_path)
+        except Exception as e:
+            result["duration_gate"] = f"FAIL (read err: {e})"
+            result["envelope_gate"] = f"FAIL (read err: {e})"
 
-    # Envelope gate 3(a)
-    if len(act_idx) >= 1:
-        x_local = df_gt["pos_x"].values[act_idx] - SPAWN_X0
-        y_local = df_gt["pos_y"].values[act_idx] - SPAWN_Y0
-        z_act = z[act_idx]
-        t_act = t[act_idx]
+    act_idx = []
+    if df_gt is not None:
+        t = df_gt["timestamp_total_sec"].values.astype(float)
+        z = df_gt["pos_z"].values.astype(float)
+        act_idx = np.where(z >= 2.0)[0]
 
-        out_of_bounds = (
-            (x_local < LOCAL_X_MIN) | (x_local > LOCAL_X_MAX) |
-            (y_local < LOCAL_Y_MIN) | (y_local > LOCAL_Y_MAX) |
-            (z_act < ENVELOPE_ALT_MIN) | (z_act > ENVELOPE_ALT_MAX)
-        )
-        if np.any(out_of_bounds):
-            first_idx = int(np.where(out_of_bounds)[0][0])
-            t_v = t_act[first_idx]
-            x_v = x_local[first_idx]
-            y_v = y_local[first_idx]
-            z_v = z_act[first_idx]
-            result["envelope_gate"] = "FAIL"
-            result["first_envelope_viol"] = f"t={t_v:.2f}s, X={x_v:.2f}, Y={y_v:.2f}, Z={z_v:.2f}"
+        # Duration gate
+        if len(act_idx) < 10:
+            result["duration_gate"] = "FAIL (never reached 2.0m)"
         else:
-            result["envelope_gate"] = "PASS"
-            result["first_envelope_viol"] = "-"
-    else:
-        result["envelope_gate"] = "FAIL (no active samples)"
+            dur = float(t[act_idx[-1]] - t[act_idx[0]])
+            if dur >= 18.0:
+                result["duration_gate"] = f"PASS ({dur:.1f}s)"
+            else:
+                result["duration_gate"] = f"FAIL ({dur:.1f}s < 18s)"
+
+        # Envelope gate 3(a)
+        if len(act_idx) >= 1:
+            x_local = df_gt["pos_x"].values[act_idx] - SPAWN_X0
+            y_local = df_gt["pos_y"].values[act_idx] - SPAWN_Y0
+            z_act = z[act_idx]
+            t_act = t[act_idx]
+
+            out_of_bounds = (
+                (x_local < LOCAL_X_MIN) | (x_local > LOCAL_X_MAX) |
+                (y_local < LOCAL_Y_MIN) | (y_local > LOCAL_Y_MAX) |
+                (z_act < ENVELOPE_ALT_MIN) | (z_act > ENVELOPE_ALT_MAX)
+            )
+            if np.any(out_of_bounds):
+                first_idx = int(np.where(out_of_bounds)[0][0])
+                t_v = t_act[first_idx]
+                x_v = x_local[first_idx]
+                y_v = y_local[first_idx]
+                z_v = z_act[first_idx]
+                result["envelope_gate"] = "FAIL"
+                result["first_envelope_viol"] = f"t={t_v:.2f}s, X={x_v:.2f}, Y={y_v:.2f}, Z={z_v:.2f}"
+            else:
+                result["envelope_gate"] = "PASS"
+                result["first_envelope_viol"] = "-"
+        else:
+            result["envelope_gate"] = "FAIL (no active samples)"
 
     # PX4 failsafe gate 3(b)
     px4_log = flight_dir / "px4_sitl.log"
@@ -162,6 +214,133 @@ def evaluate_flight(flight_dir: Path, attempt_num: int) -> dict:
     else:
         result["failsafe_gate"] = "PASS (no log)"
 
+    # Health and Failsafe Warnings Gate
+    ulog_path = find_ulog_path(flight_dir)
+    ulog_obj = None
+    if ulog_path is not None and ULog is not None:
+        try:
+            ulog_obj = ULog(str(ulog_path))
+        except Exception:
+            ulog_obj = None
+
+    post_arm_warns = []
+    pre_notes = []
+    t_arm = None
+    t_disarm = None
+
+    if ulog_obj is not None:
+        for msg in ulog_obj.logged_messages:
+            text = msg.message
+            ts = msg.timestamp / 1e6
+            if "Armed by external command" in text:
+                t_arm = ts
+            elif "Disarmed" in text:
+                t_disarm = ts
+
+        # Check pre-arm notes from px4_sitl.log
+        if px4_log.exists():
+            try:
+                for line in px4_log.read_text(errors="replace").splitlines():
+                    if "Armed by external command" in line:
+                        break
+                    if "Preflight Fail: system power unavailable" in line:
+                        if "Preflight Fail: system power unavailable" not in pre_notes:
+                            pre_notes.append("Preflight Fail: system power unavailable")
+            except Exception:
+                pass
+
+        for msg in ulog_obj.logged_messages:
+            ts = msg.timestamp / 1e6
+            text = msg.message.strip()
+
+            matched = False
+            for w in HEALTH_WARN_TARGETS:
+                if w in text:
+                    matched = True
+                    break
+            if not matched and "Preflight Fail:" in text:
+                matched = True
+
+            if matched:
+                if t_arm is not None and ts >= t_arm and (t_disarm is None or ts <= t_disarm):
+                    post_arm_warns.append((ts, text))
+                elif t_arm is None or ts < t_arm:
+                    if "system power unavailable" in text:
+                        if text not in pre_notes:
+                            pre_notes.append(text)
+
+        if post_arm_warns:
+            result["warn_gate"] = "FAIL"
+            warn_strs = [f"{ts:.2f}s: {txt}" for ts, txt in post_arm_warns]
+            result["warnings_or_notes"] = "; ".join(warn_strs)
+        else:
+            result["warn_gate"] = "PASS"
+            result["warnings_or_notes"] = f"[Note: {'; '.join(pre_notes)}]" if pre_notes else "-"
+
+    else:
+        # Fallback to px4_sitl.log matching
+        if px4_log.exists():
+            after_arm = False
+            try:
+                for line in px4_log.read_text(errors="replace").splitlines():
+                    if "Armed by external command" in line:
+                        after_arm = True
+                        continue
+                    if not after_arm:
+                        if "Preflight Fail: system power unavailable" in line:
+                            if "Preflight Fail: system power unavailable" not in pre_notes:
+                                pre_notes.append("Preflight Fail: system power unavailable")
+                    else:
+                        matched = False
+                        for w in HEALTH_WARN_TARGETS:
+                            if w in line:
+                                matched = True
+                                break
+                        if not matched and "Preflight Fail:" in line:
+                            matched = True
+                        if matched:
+                            post_arm_warns.append((None, line.strip()))
+            except Exception:
+                pass
+
+            if post_arm_warns:
+                result["warn_gate"] = "FAIL"
+                result["warnings_or_notes"] = "; ".join(f"fallback: {txt}" for _, txt in post_arm_warns)
+            else:
+                result["warn_gate"] = "unverifiable-fallback"
+                result["warnings_or_notes"] = f"[Note: {'; '.join(pre_notes)}]" if pre_notes else "-"
+        else:
+            result["warn_gate"] = "unverifiable-fallback"
+            result["warnings_or_notes"] = "-"
+
+    # Any failure on this flight?
+    any_fail = (
+        not result["duration_gate"].startswith("PASS") or
+        result["envelope_gate"] != "PASS" or
+        not result["failsafe_gate"].startswith("PASS") or
+        result["warn_gate"] == "FAIL"
+    )
+
+    if any_fail and df_gt is not None:
+        try:
+            quats = df_gt[["rot_x", "rot_y", "rot_z", "rot_w"]].values
+            rots = R_scipy.from_quat(quats)
+            body_z_world = rots.apply([0, 0, 1])
+            z_comp = np.clip(body_z_world[:, 2], -1.0, 1.0)
+            tilt_deg = np.rad2deg(np.arccos(z_comp))
+            t_gt = df_gt["timestamp_total_sec"].values.astype(float)
+            mask = (tilt_deg > 45.0)
+            if t_arm is not None:
+                mask &= (t_gt >= t_arm)
+            idx_45 = np.where(mask)[0]
+            if len(idx_45) > 0:
+                result["first_tilt_45"] = f"{t_gt[idx_45[0]]:.2f}s"
+            else:
+                result["first_tilt_45"] = "none"
+        except Exception:
+            result["first_tilt_45"] = "err"
+
+    result["pre_arm_notes"] = "; ".join(pre_notes)
     return result
 
 
@@ -195,11 +374,11 @@ def main():
     # Format Markdown Table
     headers = [
         "flight", "attempt", "duration gate", "envelope gate", "failsafe gate",
-        "motion gate", "first envelope violation (time, local X/Y/Z)", "failsafe lines found"
+        "motion gate", "warn gate", "warnings fired / notes", "first tilt > 45s", "first envelope viol"
     ]
     keys = [
         "flight", "attempt", "duration_gate", "envelope_gate", "failsafe_gate",
-        "motion_gate", "first_envelope_viol", "failsafe_lines"
+        "motion_gate", "warn_gate", "warnings_or_notes", "first_tilt_45", "first_envelope_viol"
     ]
     col_widths = [max(len(h), max((len(str(r[k])) for r in results), default=0)) for h, k in zip(headers, keys)]
 
@@ -216,8 +395,10 @@ def main():
             str(r["envelope_gate"]).ljust(col_widths[3]),
             str(r["failsafe_gate"]).ljust(col_widths[4]),
             str(r["motion_gate"]).ljust(col_widths[5]),
-            str(r["first_envelope_viol"]).ljust(col_widths[6]),
-            str(r["failsafe_lines"]).ljust(col_widths[7]),
+            str(r["warn_gate"]).ljust(col_widths[6]),
+            str(r["warnings_or_notes"]).ljust(col_widths[7]),
+            str(r["first_tilt_45"]).center(col_widths[8]),
+            str(r["first_envelope_viol"]).ljust(col_widths[9]),
         ]
         print(" | ".join(vals))
 
@@ -226,12 +407,16 @@ def main():
     n_dur_pass = sum(1 for r in results if r["duration_gate"].startswith("PASS"))
     n_env_pass = sum(1 for r in results if r["envelope_gate"] == "PASS")
     n_fs_pass  = sum(1 for r in results if r["failsafe_gate"].startswith("PASS"))
+    n_warn_pass = sum(1 for r in results if r["warn_gate"] == "PASS")
 
     print("\nSummary:")
     print(f"  Total flights evaluated: {n_total}")
     print(f"  Duration Gate PASS: {n_dur_pass}/{n_total} (Fails: {[r['flight'] for r in results if not r['duration_gate'].startswith('PASS')]})")
     print(f"  Envelope Gate PASS: {n_env_pass}/{n_total} (Fails: {[r['flight'] for r in results if r['envelope_gate'] != 'PASS']})")
     print(f"  PX4 Failsafe PASS:  {n_fs_pass}/{n_total} (Fails: {[r['flight'] for r in results if not r['failsafe_gate'].startswith('PASS')]})")
+    print(f"  Health Warning Gate PASS: {n_warn_pass}/{n_total} (Fails: {[r['flight'] for r in results if r['warn_gate'] == 'FAIL']})")
+    notes_list = [(r['flight'], r['pre_arm_notes']) for r in results if r['pre_arm_notes']]
+    print(f"  Pre-arm Notes: {notes_list}")
 
 
 if __name__ == "__main__":
