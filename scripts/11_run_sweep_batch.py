@@ -821,8 +821,9 @@ def run_flight(
     env: dict,
     log_records: list,
     execute_attempt_fn=execute_single_attempt,
+    max_attempts: int = 2,
 ):
-    """Execute flight with strict max-2-attempts discipline and logging."""
+    """Execute flight with strict max-attempts discipline and logging."""
     flight_dir = DATASET_DIR / flight_name
     r2_raw_dir = R2_RAW_DIR / flight_name
     commanded_yaw = {"G": 7.5, "M": 20.0, "A": 45.0, "E": 90.0}[yaw_bin]
@@ -869,7 +870,6 @@ def run_flight(
             arch_n += 1
         preserve_attempt_directory(flight_dir, arch_n)
 
-    max_attempts = 2
     attempt_history = []
     last_gate_res = {}
 
@@ -1171,6 +1171,7 @@ def generate_batch_report(log_records: list):
 def main():
     parser = argparse.ArgumentParser(description="Systematic 4x4 Flight Sweep Batch Runner")
     parser.add_argument('--single', type=str, default=None, help="Run a single flight, e.g. 'G_C_R1'")
+    parser.add_argument('--max-attempts', type=int, default=2, help="Maximum attempts per flight (default: 2)")
     args = parser.parse_args()
 
     print("=================================================================")
@@ -1216,7 +1217,7 @@ def main():
     for idx, (fl_name, y_bin, m_bin, rep) in enumerate(scheduled_flights, 1):
         print(f"\n[{idx}/{total}] Processing {fl_name}...")
         try:
-            run_flight(fl_name, y_bin, m_bin, rep, env, log_records)
+            run_flight(fl_name, y_bin, m_bin, rep, env, log_records, max_attempts=args.max_attempts)
         except Exception as e:
             print(f"  [ERROR] Unhandled exception in flight {fl_name}: {e}")
             log_records.append({
@@ -1225,7 +1226,7 @@ def main():
                 "yaw_bin": y_bin,
                 "motion_bin": m_bin,
                 "repeat": rep,
-                "attempts_used": 2,
+                "attempts_used": args.max_attempts,
                 "status": "FAIL",
                 "fail_reason": f"Unhandled exception: {e}",
                 "commanded_yaw_rate": {"G": 7.5, "M": 20.0, "A": 45.0, "E": 90.0}[y_bin],

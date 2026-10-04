@@ -315,6 +315,63 @@ class TestRetryLogic(unittest.TestCase):
         self.assertEqual((target_dir / "existing.txt").read_text(), "dont_overwrite_me")
         self.assertTrue(flight_dir.exists())
 
+    def test_max_attempts_one_failing(self):
+        """With max_attempts=1 and a failing mock:
+        - exactly one attempt runs
+        - plain flight dir keeps the data
+        - no _attempt dir is created
+        - attempts_used == 1
+        - status == 'FAIL'
+        """
+        flight_name = "sweep_G_H_R1"
+        call_count = [0]
+
+        def stub_failing_flight(flight_dir: Path, yaw_bin: str, motion_bin: str, env: dict):
+            call_count[0] += 1
+            create_dummy_flight_files(flight_dir, f"attempt{call_count[0]}")
+            gate_res = {
+                "gate_duration": "FAIL",
+                "gate_envelope": "FAIL",
+                "gate_failsafe": "PASS",
+                "gate_motion_exit": "PASS",
+                "gate_health_warn": "PASS",
+                "health_warnings_fired": "",
+                "arming_time_s": 10.85,
+                "first_tilt_exceed_45_s": 27.8,
+                "pre_arm_notes": "",
+                "combined_pass": False,
+                "fail_reasons": ["Simulated failure on attempt 1"],
+            }
+            return False, "Simulated failure on attempt 1", gate_res
+
+        log_records = []
+        ok = run_flight(
+            flight_name=flight_name,
+            yaw_bin="G",
+            motion_bin="H",
+            repeat=1,
+            env={},
+            log_records=log_records,
+            execute_attempt_fn=stub_failing_flight,
+            max_attempts=1,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(call_count[0], 1, "Exactly one attempt must run when max_attempts=1")
+        self.assertEqual(len(log_records), 1)
+        rec = log_records[0]
+        self.assertEqual(rec["status"], "FAIL")
+        self.assertEqual(rec["attempts_used"], 1)
+
+        final_dir = self.dataset_dir / flight_name
+        self.assertTrue(final_dir.exists(), "Plain flight dir must exist and keep data")
+        self.assertTrue((final_dir / "attempt_marker_attempt1.txt").exists(), "Attempt data must be preserved in plain dir")
+        self.assertEqual((final_dir / "attempt_marker_attempt1.txt").read_text(), "data_for_attempt1")
+
+        # Assert no _attempt directory was created
+        attempt_dirs = list(self.dataset_dir.glob(f"{flight_name}_attempt*"))
+        self.assertEqual(len(attempt_dirs), 0, f"No _attempt dir should be created, found: {attempt_dirs}")
+
 
 if __name__ == "__main__":
     unittest.main()
