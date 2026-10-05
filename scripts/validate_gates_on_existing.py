@@ -40,8 +40,12 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 try:
     batch_module = importlib.import_module("11_run_sweep_batch")
     compute_tilt_metrics = batch_module.compute_tilt_metrics
+    classify_warning_timing = batch_module.classify_warning_timing
+    compute_loss_of_control = batch_module.compute_loss_of_control
 except Exception:
     compute_tilt_metrics = None
+    classify_warning_timing = None
+    compute_loss_of_control = None
 
 PX4_DIR = os.environ.get("PX4_DIR", str(Path.home() / "PX4-Autopilot"))
 
@@ -142,9 +146,17 @@ def evaluate_flight(flight_dir: Path, attempt_num: int) -> dict:
         "first_tilt_exceed_45_s": "-",
         "first_tilt_z_m": "-",
         "max_tilt_inflight_deg": "-",
+        "max_tilt_motion_deg": "-",
         "landing_command_s": "-",
         "max_tilt_post_landcmd_deg": "-",
         "z_at_max_tilt_post_landcmd": "-",
+        "first_loss_of_control_s": "-",
+        "loss_of_control_indicator": "-",
+        "t_onset_tilt": "-",
+        "t_onset_vz": "-",
+        "t_onset_yaw": "-",
+        "first_warn_time": "-",
+        "warning_timing_class": "no_warning",
         "headline_eligible": False,
         "old_max_tilt_z2": "-",
         "first_tilt_any_s": "-",
@@ -238,6 +250,7 @@ def evaluate_flight(flight_dir: Path, attempt_num: int) -> dict:
         except Exception:
             ulog_obj = None
 
+    all_warns = []
     post_arm_warns = []
     pre_notes = []
     t_arm = None
@@ -277,6 +290,8 @@ def evaluate_flight(flight_dir: Path, attempt_num: int) -> dict:
                     if "Preflight Fail: system power unavailable" in line:
                         if "Preflight Fail: system power unavailable" not in pre_notes:
                             pre_notes.append("Preflight Fail: system power unavailable")
+                        if not any("system power unavailable" in w[1] for w in all_warns):
+                            all_warns.insert(0, (0.0, "Preflight Fail: system power unavailable"))
             except Exception:
                 pass
 
@@ -293,6 +308,7 @@ def evaluate_flight(flight_dir: Path, attempt_num: int) -> dict:
                 matched = True
 
             if matched:
+                all_warns.append((ts, text))
                 if t_arm is not None and ts >= t_arm and (t_disarm is None or ts <= t_disarm):
                     post_arm_warns.append((ts, text))
                 elif t_arm is None or ts < t_arm:
@@ -321,6 +337,8 @@ def evaluate_flight(flight_dir: Path, attempt_num: int) -> dict:
                         if "Preflight Fail: system power unavailable" in line:
                             if "Preflight Fail: system power unavailable" not in pre_notes:
                                 pre_notes.append("Preflight Fail: system power unavailable")
+                            if not any("system power unavailable" in w[1] for w in all_warns):
+                                all_warns.insert(0, (0.0, "Preflight Fail: system power unavailable"))
                     else:
                         matched = False
                         for w in HEALTH_WARN_TARGETS:
@@ -330,6 +348,7 @@ def evaluate_flight(flight_dir: Path, attempt_num: int) -> dict:
                         if not matched and "Preflight Fail:" in line:
                             matched = True
                         if matched:
+                            all_warns.append((t_arm if t_arm is not None else 0.0, line.strip()))
                             post_arm_warns.append((None, line.strip()))
             except Exception:
                 pass
@@ -344,17 +363,25 @@ def evaluate_flight(flight_dir: Path, attempt_num: int) -> dict:
             result["warn_gate"] = "unverifiable-fallback"
             result["warnings_or_notes"] = "-"
 
-    # Evaluate tilt metrics whenever GT is available
+    # Evaluate tilt and loss of control metrics whenever GT is available
     if df_gt is not None:
         if compute_tilt_metrics is not None:
-            tm = compute_tilt_metrics(df_gt, t_arm=t_arm, t_land_cmd=t_land_cmd, t_disarm=t_disarm)
+            m_yaw = re.match(r"sweep_([GMAE])_", flight_dir.name)
+            yaw_bin = m_yaw.group(1) if m_yaw else "G"
+            tm = compute_tilt_metrics(df_gt, t_arm=t_arm, t_land_cmd=t_land_cmd, t_disarm=t_disarm, yaw_bin=yaw_bin)
             result["first_tilt_exceed_45_s"] = str(tm["first_tilt_exceed_45_s"]) if tm["first_tilt_exceed_45_s"] != "" else "-"
             result["first_tilt_z_m"] = str(tm["first_tilt_z_m"]) if tm["first_tilt_z_m"] != "" else "-"
             result["max_tilt_inflight_deg"] = str(tm["max_tilt_inflight_deg"]) if tm["max_tilt_inflight_deg"] != "" else "-"
+            result["max_tilt_motion_deg"] = str(tm.get("max_tilt_motion_deg", "")) if tm.get("max_tilt_motion_deg", "") != "" else "-"
             result["landing_command_s"] = str(tm["landing_command_s"]) if tm["landing_command_s"] != "" else "-"
             result["first_tilt_any_s"] = str(tm["first_tilt_any_s"]) if tm["first_tilt_any_s"] != "" else "-"
             result["max_tilt_post_landcmd_deg"] = str(tm.get("max_tilt_post_landcmd_deg", "")) if tm.get("max_tilt_post_landcmd_deg", "") != "" else "-"
             result["z_at_max_tilt_post_landcmd"] = str(tm.get("z_at_max_tilt_post_landcmd", "")) if tm.get("z_at_max_tilt_post_landcmd", "") != "" else "-"
+            result["first_loss_of_control_s"] = str(tm.get("first_loss_of_control_s", "")) if tm.get("first_loss_of_control_s", "") != "" else "-"
+            result["loss_of_control_indicator"] = str(tm.get("loss_of_control_indicator", "")) if tm.get("loss_of_control_indicator", "") != "" else "-"
+            result["t_onset_tilt"] = str(tm.get("t_onset_tilt", "")) if tm.get("t_onset_tilt", "") != "" else "-"
+            result["t_onset_vz"] = str(tm.get("t_onset_vz", "")) if tm.get("t_onset_vz", "") != "" else "-"
+            result["t_onset_yaw"] = str(tm.get("t_onset_yaw", "")) if tm.get("t_onset_yaw", "") != "" else "-"
 
         # Old z >= 2.0 max tilt
         z_vals = df_gt["pos_z"].values.astype(float)
@@ -369,18 +396,25 @@ def evaluate_flight(flight_dir: Path, attempt_num: int) -> dict:
         else:
             result["old_max_tilt_z2"] = "-"
 
-    # Headline eligibility (D1)
+    # Warning timing classification (D3)
+    first_loc_s = float(result["first_loss_of_control_s"]) if result["first_loss_of_control_s"] != "-" else None
+    if classify_warning_timing is not None:
+        result["warning_timing_class"] = classify_warning_timing(t_arm, first_loc_s, all_warns)
+    if post_arm_warns and post_arm_warns[0][0] is not None:
+        result["first_warn_time"] = f"{post_arm_warns[0][0]:.3f}"
+
+    # Headline eligibility (D1): hardened gates PASS (pre-arm power note ignored) AND max_tilt_motion_deg < 45.0
     hardened_pass = (
         result["duration_gate"].startswith("PASS") and
         result["envelope_gate"] == "PASS" and
         result["failsafe_gate"].startswith("PASS") and
         result["warn_gate"] == "PASS"
     )
-    max_tilt_str = result["max_tilt_inflight_deg"]
+    max_motion_str = result["max_tilt_motion_deg"]
     tilt_ok = False
-    if max_tilt_str != "-":
+    if max_motion_str != "-":
         try:
-            tilt_ok = float(max_tilt_str) < 45.0
+            tilt_ok = float(max_motion_str) < 45.0
         except (ValueError, TypeError):
             tilt_ok = False
     result["headline_eligible"] = hardened_pass and tilt_ok
@@ -416,14 +450,14 @@ def main():
         res = evaluate_flight(d, attempt_num)
         results.append(res)
 
-    # Format Markdown Table
+    # Format Validator Markdown Table
     headers = [
-        "flight", "att", "first_tilt_exceed_45_s", "z_cross", "max_tilt_inflight",
+        "flight", "att", "max_motion", "max_inflight", "first_tilt_exceed_45_s", "z_cross",
         "land_cmd_s", "max_tilt_post", "z_max_post", "old_tilt_z2", "first_any_s",
         "dur_gate", "env_gate", "failsafe", "warn_gate", "headline_eligible"
     ]
     keys = [
-        "flight", "attempt", "first_tilt_exceed_45_s", "first_tilt_z_m", "max_tilt_inflight_deg",
+        "flight", "attempt", "max_tilt_motion_deg", "max_tilt_inflight_deg", "first_tilt_exceed_45_s", "first_tilt_z_m",
         "landing_command_s", "max_tilt_post_landcmd_deg", "z_at_max_tilt_post_landcmd", "old_max_tilt_z2", "first_tilt_any_s",
         "duration_gate", "envelope_gate", "failsafe_gate", "warn_gate", "headline_eligible"
     ]
@@ -432,25 +466,29 @@ def main():
     header_row = " | ".join(h.ljust(w) for h, w in zip(headers, col_widths))
     sep_row = "-|-".join("-" * w for w in col_widths)
 
+    print("\n" + "="*80)
+    print("VALIDATOR TABLE (All 48 Flights)")
+    print("="*80)
     print(header_row)
     print(sep_row)
     for r in results:
         vals = [
             str(r["flight"]).ljust(col_widths[0]),
             str(r["attempt"]).center(col_widths[1]),
-            str(r["first_tilt_exceed_45_s"]).center(col_widths[2]),
-            str(r["first_tilt_z_m"]).center(col_widths[3]),
-            str(r["max_tilt_inflight_deg"]).center(col_widths[4]),
-            str(r["landing_command_s"]).center(col_widths[5]),
-            str(r["max_tilt_post_landcmd_deg"]).center(col_widths[6]),
-            str(r["z_at_max_tilt_post_landcmd"]).center(col_widths[7]),
-            str(r["old_max_tilt_z2"]).center(col_widths[8]),
-            str(r["first_tilt_any_s"]).center(col_widths[9]),
-            str(r["duration_gate"]).ljust(col_widths[10]),
-            str(r["envelope_gate"]).ljust(col_widths[11]),
-            str(r["failsafe_gate"]).ljust(col_widths[12]),
-            str(r["warn_gate"]).ljust(col_widths[13]),
-            str(r["headline_eligible"]).center(col_widths[14]),
+            str(r["max_tilt_motion_deg"]).center(col_widths[2]),
+            str(r["max_tilt_inflight_deg"]).center(col_widths[3]),
+            str(r["first_tilt_exceed_45_s"]).center(col_widths[4]),
+            str(r["first_tilt_z_m"]).center(col_widths[5]),
+            str(r["landing_command_s"]).center(col_widths[6]),
+            str(r["max_tilt_post_landcmd_deg"]).center(col_widths[7]),
+            str(r["z_at_max_tilt_post_landcmd"]).center(col_widths[8]),
+            str(r["old_max_tilt_z2"]).center(col_widths[9]),
+            str(r["first_tilt_any_s"]).center(col_widths[10]),
+            str(r["duration_gate"]).ljust(col_widths[11]),
+            str(r["envelope_gate"]).ljust(col_widths[12]),
+            str(r["failsafe_gate"]).ljust(col_widths[13]),
+            str(r["warn_gate"]).ljust(col_widths[14]),
+            str(r["headline_eligible"]).center(col_widths[15]),
         ]
         print(" | ".join(vals))
 
@@ -483,24 +521,56 @@ def main():
         if r["warn_gate"] != "PASS":
             reasons.append(f"health_warn: {r['warn_gate']}")
         try:
-            if float(r["max_tilt_inflight_deg"]) >= 45.0:
-                reasons.append(f"max_tilt_inflight: {r['max_tilt_inflight_deg']} >= 45.0")
+            if float(r["max_tilt_motion_deg"]) >= 45.0:
+                reasons.append(f"max_tilt_motion: {r['max_tilt_motion_deg']} >= 45.0")
         except Exception:
             pass
         print(f"  - {r['flight']}: {'; '.join(reasons)}")
 
-    # Flagging sustained in-flight crossing
-    expected_sustained = {"sweep_G_B_R1", "sweep_G_H_R1", "sweep_G_H_R3", "sweep_M_H_R2", "sweep_M_H_R3"}
-    actual_sustained = {r["flight"] for r in results if r["first_tilt_exceed_45_s"] != "-"}
-    unexpected_sustained = actual_sustained - expected_sustained
+    # Part 3 Calibration Table
+    print("\n" + "="*80)
+    print("PART 3 CALIBRATION TABLE (All 48 Flights)")
+    print("="*80)
+    cal_headers = ["flight", "first_loc_s", "indicator", "t_tilt", "t_vz", "t_yaw", "first_warn", "timing_class"]
+    cal_keys = ["flight", "first_loss_of_control_s", "loss_of_control_indicator", "t_onset_tilt", "t_onset_vz", "t_onset_yaw", "first_warn_time", "warning_timing_class"]
+    cal_col_widths = [max(len(h), max((len(str(r[k])) for r in results), default=0)) for h, k in zip(cal_headers, cal_keys)]
+    print(" | ".join(h.ljust(w) for h, w in zip(cal_headers, cal_col_widths)))
+    print("-|-".join("-" * w for w in cal_col_widths))
+    for r in results:
+        vals = [
+            str(r["flight"]).ljust(cal_col_widths[0]),
+            str(r["first_loss_of_control_s"]).center(cal_col_widths[1]),
+            str(r["loss_of_control_indicator"]).center(cal_col_widths[2]),
+            str(r["t_onset_tilt"]).center(cal_col_widths[3]),
+            str(r["t_onset_vz"]).center(cal_col_widths[4]),
+            str(r["t_onset_yaw"]).center(cal_col_widths[5]),
+            str(r["first_warn_time"]).center(cal_col_widths[6]),
+            str(r["warning_timing_class"]).ljust(cal_col_widths[7]),
+        ]
+        print(" | ".join(vals))
 
-    print("\nSustained In-Flight Crossing Check:")
-    print(f"  Expected candidate set: {sorted(expected_sustained)}")
-    print(f"  Detected sustained crossings: {sorted(actual_sustained)}")
-    if unexpected_sustained:
-        print(f"  [FLAG] Unexpected flights outside {sorted(expected_sustained)}: {sorted(unexpected_sustained)}")
+    # Calibration Acceptance Check
+    flagged_loc = [r["flight"] for r in results if r["first_loss_of_control_s"] != "-"]
+    expected_loc_required = {"sweep_G_B_R1", "sweep_G_H_R1", "sweep_G_H_R3", "sweep_M_H_R3"}
+    allowed_loc_superset = {"sweep_G_B_R1", "sweep_G_H_R1", "sweep_G_H_R3", "sweep_M_H_R2", "sweep_M_H_R3"}
+
+    print("\nCalibration Acceptance Check:")
+    print(f"  Detected loss of control flights: {sorted(flagged_loc)}")
+    missing_required = expected_loc_required - set(flagged_loc)
+    outside_superset = set(flagged_loc) - allowed_loc_superset
+    if missing_required:
+        print(f"  [FAIL] Missing required flagged flights: {sorted(missing_required)}")
+    elif outside_superset:
+        print(f"  [FAIL] Unexpected flights flagged outside allowed superset: {sorted(outside_superset)}")
     else:
-        print("  [OK] No unexpected flights outside {G_B_R1, G_H_R1, G_H_R3, M_H_R2, M_H_R3} showed sustained in-flight crossing.")
+        m_h_r3_r = [r for r in results if r["flight"] == "sweep_M_H_R3"][0]
+        t_loc_m3 = float(m_h_r3_r["first_loss_of_control_s"])
+        print(f"  [PASS] All required flights flagged. M_H_R3 onset at {t_loc_m3:.3f}s (target: 35.75 - 36.0s).")
+        if "sweep_M_H_R2" in flagged_loc:
+            m_h_r2_r = [r for r in results if r["flight"] == "sweep_M_H_R2"][0]
+            print(f"  [INFO] M_H_R2 flagged at {m_h_r2_r['first_loss_of_control_s']}s ({m_h_r2_r['loss_of_control_indicator']}).")
+        else:
+            print("  [INFO] M_H_R2 did not flag.")
 
     notes_list = [(r['flight'], r['pre_arm_notes']) for r in results if r['pre_arm_notes']]
     if notes_list:

@@ -503,30 +503,218 @@ class TestRetryLogic(unittest.TestCase):
 
     def test_headline_eligibility(self):
         """Part 4 unit test: headline_eligible is True when all hardened gates PASS
-        and max_tilt_inflight_deg < 45.0, False otherwise."""
+        and max_tilt_motion_deg < 45.0, False otherwise."""
         # Case 1: gates pass and tilt < 45
         gate_res_pass = {
             "combined_pass": True,
-            "max_tilt_inflight_deg": 43.1,
+            "max_tilt_motion_deg": 41.62,
         }
-        tilt_ok1 = float(gate_res_pass["max_tilt_inflight_deg"]) < 45.0
+        tilt_ok1 = float(gate_res_pass["max_tilt_motion_deg"]) < 45.0
         self.assertTrue(gate_res_pass["combined_pass"] and tilt_ok1)
 
         # Case 2: gates pass but tilt >= 45
         gate_res_high_tilt = {
             "combined_pass": True,
-            "max_tilt_inflight_deg": 45.36,
+            "max_tilt_motion_deg": 45.36,
         }
-        tilt_ok2 = float(gate_res_high_tilt["max_tilt_inflight_deg"]) < 45.0
+        tilt_ok2 = float(gate_res_high_tilt["max_tilt_motion_deg"]) < 45.0
         self.assertFalse(gate_res_high_tilt["combined_pass"] and tilt_ok2)
 
         # Case 3: gates fail even if tilt < 45
         gate_res_gate_fail = {
             "combined_pass": False,
-            "max_tilt_inflight_deg": 15.0,
+            "max_tilt_motion_deg": 15.0,
         }
-        tilt_ok3 = float(gate_res_gate_fail["max_tilt_inflight_deg"]) < 45.0
+        tilt_ok3 = float(gate_res_gate_fail["max_tilt_motion_deg"]) < 45.0
         self.assertFalse(gate_res_gate_fail["combined_pass"] and tilt_ok3)
+
+    def test_max_tilt_motion_deg_excludes_return_braking(self):
+        """max_tilt_motion_deg measures tilt from arming to min(motion_start + 22.0s, land_cmd),
+        excluding return braking spikes occurring before landing command."""
+        compute_tilt_metrics = batch_module.compute_tilt_metrics
+        t_arr = np.arange(10.0, 50.0, 0.02)
+        tilts = np.full(len(t_arr), 5.0)
+        z_arr = np.full(len(t_arr), 2.5)
+
+        # Vehicle reaches z=2.0 at index 0 (t=10.0s), so motion_start = 10.65s, motion_end = 32.65s
+        # Simulate return braking tilt of 43.2 deg at t=35.0s - 36.5s (before landing command at 42.0s)
+        brake_idx = np.where((t_arr >= 35.0) & (t_arr <= 36.5))[0]
+        tilts[brake_idx] = 43.2
+
+        quats = R_scipy.from_euler("x", tilts[:, None], degrees=True).as_quat()
+        df_gt = pd.DataFrame({
+            "sample_idx": np.arange(len(t_arr)),
+            "timestamp_total_sec": t_arr,
+            "pos_x": 0.0,
+            "pos_y": 0.0,
+            "pos_z": z_arr,
+            "rot_x": quats[:, 0],
+            "rot_y": quats[:, 1],
+            "rot_z": quats[:, 2],
+            "rot_w": quats[:, 3],
+        })
+
+        metrics = compute_tilt_metrics(df_gt, t_arm=10.0, t_land_cmd=42.0)
+        self.assertEqual(metrics["max_tilt_motion_deg"], 5.0, "max_tilt_motion_deg must exclude return braking spike")
+        self.assertEqual(metrics["max_tilt_inflight_deg"], 43.2, "max_tilt_inflight_deg must include full in-flight window")
+
+    def test_indicators_single_sample_spike_must_not_trigger(self):
+        """Single-sample spikes must NOT trigger each loss-of-control indicator."""
+        compute_loss_of_control = batch_module.compute_loss_of_control
+        t_arr = np.arange(10.0, 50.0, 0.02)
+        z_arr = np.full(len(t_arr), 2.5)
+        tilts = np.full(len(t_arr), 5.0)
+        yaws = np.zeros(len(t_arr))
+
+        # Single-sample spike in tilt (i) at t=15.0s
+        idx_tilt = np.argmin(np.abs(t_arr - 15.0))
+        tilts[idx_tilt] = 80.0
+
+        # Single-sample spike in z (ii) at t=20.0s (generating large instantaneous vz)
+        idx_z = np.argmin(np.abs(t_arr - 20.0))
+        z_arr[idx_z] = 5.0
+
+        # Single-sample spike in yaw (iii) at t=25.0s (generating large instantaneous yaw rate)
+        idx_yaw = np.argmin(np.abs(t_arr - 25.0))
+        yaws[idx_yaw] = 90.0
+
+        rots = R_scipy.from_euler("zyx", np.column_stack([yaws, np.zeros_like(tilts), tilts]), degrees=True)
+        quats = rots.as_quat()
+
+        df_gt = pd.DataFrame({
+            "sample_idx": np.arange(len(t_arr)),
+            "timestamp_total_sec": t_arr,
+            "pos_x": 0.0,
+            "pos_y": 0.0,
+            "pos_z": z_arr,
+            "rot_x": quats[:, 0],
+            "rot_y": quats[:, 1],
+            "rot_z": quats[:, 2],
+            "rot_w": quats[:, 3],
+        })
+
+        res = compute_loss_of_control(df_gt, yaw_bin="G", t_arm=10.0, t_land_cmd=42.0)
+        self.assertEqual(res["first_loss_of_control_s"], "", "Single-sample spikes must not trigger loss of control")
+        self.assertEqual(res["loss_of_control_indicator"], "")
+        self.assertEqual(res["t_onset_tilt"], "")
+        self.assertEqual(res["t_onset_vz"], "")
+        self.assertEqual(res["t_onset_yaw"], "")
+
+    def test_indicators_sustained_excursion_before_landing_command_triggers(self):
+        """Sustained excursion before the landing command triggers each indicator."""
+        compute_loss_of_control = batch_module.compute_loss_of_control
+        t_arr = np.arange(10.0, 50.0, 0.02)
+
+        # 1. Sustained tilt > 45 deg (indicator i)
+        z_arr = np.full(len(t_arr), 2.5)
+        tilts = np.full(len(t_arr), 5.0)
+        yaws = np.zeros(len(t_arr))
+        # Excursion from index 500 (t=20.0s) for 10 samples (0.18s)
+        tilts[500:510] = 55.0
+        quats = R_scipy.from_euler("zyx", np.column_stack([yaws, np.zeros_like(tilts), tilts]), degrees=True).as_quat()
+        df_gt = pd.DataFrame({
+            "sample_idx": np.arange(len(t_arr)),
+            "timestamp_total_sec": t_arr,
+            "pos_x": 0.0,
+            "pos_y": 0.0,
+            "pos_z": z_arr,
+            "rot_x": quats[:, 0], "rot_y": quats[:, 1], "rot_z": quats[:, 2], "rot_w": quats[:, 3],
+        })
+        res_i = compute_loss_of_control(df_gt, yaw_bin="G", t_arm=10.0, t_land_cmd=42.0)
+        self.assertEqual(res_i["first_loss_of_control_s"], round(float(t_arr[500]), 3))
+        self.assertEqual(res_i["loss_of_control_indicator"], "tilt")
+        self.assertEqual(res_i["t_onset_tilt"], round(float(t_arr[500]), 3))
+
+        # 2. Sustained |vz| > 1.0 m/s (indicator ii)
+        z_arr = np.full(len(t_arr), 2.5)
+        for k in range(600, 615):  # from t=22.0s for 15 samples (0.28s)
+            z_arr[k] = z_arr[k-1] + 1.5 * 0.02
+        tilts = np.full(len(t_arr), 5.0)
+        quats = R_scipy.from_euler("x", tilts[:, None], degrees=True).as_quat()
+        df_gt = pd.DataFrame({
+            "sample_idx": np.arange(len(t_arr)),
+            "timestamp_total_sec": t_arr,
+            "pos_x": 0.0,
+            "pos_y": 0.0,
+            "pos_z": z_arr,
+            "rot_x": quats[:, 0], "rot_y": quats[:, 1], "rot_z": quats[:, 2], "rot_w": quats[:, 3],
+        })
+        res_ii = compute_loss_of_control(df_gt, yaw_bin="G", t_arm=10.0, t_land_cmd=42.0)
+        self.assertEqual(res_ii["loss_of_control_indicator"], "vertical_speed")
+        self.assertEqual(res_ii["first_loss_of_control_s"], round(float(t_arr[600]), 3))
+
+        # 3. Sustained |yaw_rate| > threshold (indicator iii)
+        z_arr = np.full(len(t_arr), 2.5)
+        tilts = np.full(len(t_arr), 5.0)
+        yaws = np.zeros(len(t_arr))
+        for k in range(800, 815):  # from t=26.0s for 15 samples (0.28s)
+            yaws[k] = yaws[k-1] + 150.0 * 0.02
+        quats = R_scipy.from_euler("z", yaws[:, None], degrees=True).as_quat()
+        df_gt = pd.DataFrame({
+            "sample_idx": np.arange(len(t_arr)),
+            "timestamp_total_sec": t_arr,
+            "pos_x": 0.0,
+            "pos_y": 0.0,
+            "pos_z": z_arr,
+            "rot_x": quats[:, 0], "rot_y": quats[:, 1], "rot_z": quats[:, 2], "rot_w": quats[:, 3],
+        })
+        res_iii = compute_loss_of_control(df_gt, yaw_bin="G", t_arm=10.0, t_land_cmd=42.0)
+        self.assertEqual(res_iii["loss_of_control_indicator"], "yaw_rate")
+        self.assertEqual(res_iii["first_loss_of_control_s"], round(float(t_arr[800]), 3))
+
+    def test_indicators_events_after_landing_command_must_not_trigger(self):
+        """Same sustained events occurring after the landing command must NOT trigger."""
+        compute_loss_of_control = batch_module.compute_loss_of_control
+        t_arr = np.arange(10.0, 50.0, 0.02)
+        z_arr = np.full(len(t_arr), 2.5)
+        tilts = np.full(len(t_arr), 5.0)
+        yaws = np.zeros(len(t_arr))
+
+        # Excursions placed at index 1750 (t=45.0s), after landing command at 42.0s
+        tilts[1750:1765] = 55.0
+        for k in range(1750, 1765):
+            z_arr[k] = z_arr[k-1] + 1.5 * 0.02
+            yaws[k] = yaws[k-1] + 150.0 * 0.02
+
+        quats = R_scipy.from_euler("zyx", np.column_stack([yaws, np.zeros_like(tilts), tilts]), degrees=True).as_quat()
+        df_gt = pd.DataFrame({
+            "sample_idx": np.arange(len(t_arr)),
+            "timestamp_total_sec": t_arr,
+            "pos_x": 0.0,
+            "pos_y": 0.0,
+            "pos_z": z_arr,
+            "rot_x": quats[:, 0], "rot_y": quats[:, 1], "rot_z": quats[:, 2], "rot_w": quats[:, 3],
+        })
+
+        res = compute_loss_of_control(df_gt, yaw_bin="G", t_arm=10.0, t_land_cmd=42.0)
+        self.assertEqual(res["first_loss_of_control_s"], "", "Post-landing command events must not trigger")
+        self.assertEqual(res["loss_of_control_indicator"], "")
+        self.assertEqual(res["t_onset_tilt"], "")
+        self.assertEqual(res["t_onset_vz"], "")
+        self.assertEqual(res["t_onset_yaw"], "")
+
+    def test_warning_timing_class_all_five_values(self):
+        """Test all five warning_timing_class values from D3."""
+        classify = batch_module.classify_warning_timing
+
+        # 1. no_warning: no warnings logged
+        self.assertEqual(classify(10.0, 25.0, []), "no_warning")
+
+        # 2. boot_only: warnings occurred, but all before arming
+        warn_boot = [(5.0, "Preflight Fail: system power unavailable")]
+        self.assertEqual(classify(10.0, 25.0, warn_boot), "boot_only")
+
+        # 3. warning_before_onset: post-arm warning fired before loss of control
+        warn_early = [(15.0, "Compass 0 fault")]
+        self.assertEqual(classify(10.0, 25.0, warn_early), "warning_before_onset")
+
+        # 4. warning_after_onset: post-arm warning fired at or after loss of control
+        warn_late = [(30.0, "Attitude failure")]
+        self.assertEqual(classify(10.0, 25.0, warn_late), "warning_after_onset")
+
+        # 5. warning_no_onset: post-arm warning fired, but no loss of control occurred
+        warn_no_loc = [(18.0, "Imbalanced propeller detected")]
+        self.assertEqual(classify(10.0, None, warn_no_loc), "warning_no_onset")
 
 
 if __name__ == "__main__":

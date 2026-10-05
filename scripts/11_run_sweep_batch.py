@@ -217,13 +217,194 @@ def find_ulog_path(flight_dir: Path) -> Path | None:
     return None
 
 
+COMMANDED_YAW_RATES = {
+    "G": 7.5,
+    "M": 20.0,
+    "A": 45.0,
+    "E": 90.0,
+}
+
+
+def compute_loss_of_control(
+    df_gt: pd.DataFrame | None,
+    yaw_bin: str = "G",
+    t_arm: float | None = None,
+    t_land_cmd: float | None = None,
+) -> dict:
+    """Compute loss of control indicators (i), (ii), and (iii) over armed, pre-landing GT telemetry.
+
+    Indicators (sustained for >= 0.1 s of GT time, no z mask):
+      (i) total tilt > 45 deg
+      (ii) |vertical speed| > 1.0 m/s (0.1 s centered window), after first z>=2.0 time + 1.0 s
+      (iii) |GT yaw rate| > max(3 * commanded, 100) deg/s (0.1 s centered window, unwrapped yaw),
+            samples with tilt > 60 deg ignored, and ignored for tau < 2.0 s where
+            tau = t - (first z>=2.0 time + 0.65 s).
+
+    Returns
+    -------
+    dict
+        - 'first_loss_of_control_s': earliest onset time among sustained indicators, or empty string.
+        - 'loss_of_control_indicator': name of the earliest indicator ('tilt', 'vertical_speed', 'yaw_rate'), or empty string.
+        - 't_onset_tilt': onset time of indicator (i), or empty string.
+        - 't_onset_vz': onset time of indicator (ii), or empty string.
+        - 't_onset_yaw': onset time of indicator (iii), or empty string.
+    """
+    res = {
+        "first_loss_of_control_s": "",
+        "loss_of_control_indicator": "",
+        "t_onset_tilt": "",
+        "t_onset_vz": "",
+        "t_onset_yaw": "",
+    }
+    if df_gt is None or len(df_gt) == 0:
+        return res
+
+    try:
+        t = df_gt["timestamp_total_sec"].values.astype(float)
+        z = df_gt["pos_z"].values.astype(float)
+        quats = df_gt[["rot_x", "rot_y", "rot_z", "rot_w"]].values
+
+        win_mask = np.ones(len(t), dtype=bool)
+        if t_arm is not None:
+            win_mask &= (t >= t_arm)
+        if t_land_cmd is not None:
+            win_mask &= (t <= t_land_cmd)
+
+        idx_z2 = np.where(z >= 2.0)[0]
+        t_z2 = float(t[idx_z2[0]]) if len(idx_z2) > 0 else None
+        motion_start = (t_z2 + 0.65) if t_z2 is not None else None
+
+        rots = R_scipy.from_quat(quats)
+        body_z_world = rots.apply([0, 0, 1])
+        z_comp = np.clip(body_z_world[:, 2], -1.0, 1.0)
+        tilt_deg = np.rad2deg(np.arccos(z_comp))
+
+        # (i) Total tilt > 45 deg
+        cond_i = win_mask & (tilt_deg > 45.0)
+
+        # (ii) |vertical speed| > 1.0 m/s (0.1 s centered window), after first z>=2.0 time + 1.0 s
+        vz_01s = np.zeros(len(t))
+        for i in range(len(t)):
+            w = (t >= t[i] - 0.05) & (t <= t[i] + 0.05)
+            dt_w = t[w][-1] - t[w][0]
+            if dt_w > 0.01:
+                vz_01s[i] = (z[w][-1] - z[w][0]) / dt_w
+
+        cond_ii = np.zeros(len(t), dtype=bool)
+        if t_z2 is not None:
+            cond_ii = win_mask & (t >= t_z2 + 1.0) & (np.abs(vz_01s) > 1.0)
+
+        # (iii) |yaw rate| > max(3 * commanded, 100) deg/s, tilt <= 60 deg, tau >= 2.0 s
+        eulers = rots.as_euler("zyx", degrees=True)
+        unwrapped_yaw_deg = np.rad2deg(np.unwrap(np.deg2rad(eulers[:, 0])))
+        yaw_rate_01s = np.zeros(len(t))
+        for i in range(len(t)):
+            w = (t >= t[i] - 0.05) & (t <= t[i] + 0.05)
+            dt_w = t[w][-1] - t[w][0]
+            if dt_w > 0.01:
+                yaw_rate_01s[i] = (unwrapped_yaw_deg[w][-1] - unwrapped_yaw_deg[w][0]) / dt_w
+
+        cmd_rate = COMMANDED_YAW_RATES.get(yaw_bin, 7.5)
+        yaw_thresh = max(3.0 * cmd_rate, 100.0)
+
+        cond_iii = np.zeros(len(t), dtype=bool)
+        if motion_start is not None:
+            tau = t - motion_start
+            cond_iii = win_mask & (tilt_deg <= 60.0) & (tau >= 2.0) & (np.abs(yaw_rate_01s) > yaw_thresh)
+
+        def find_sustained_onset(cond):
+            idx = np.where(cond)[0]
+            if len(idx) == 0:
+                return None
+            runs = []
+            cur_run = [idx[0]]
+            for k in range(1, len(idx)):
+                if idx[k] == idx[k-1] + 1:
+                    cur_run.append(idx[k])
+                else:
+                    runs.append(cur_run)
+                    cur_run = [idx[k]]
+            runs.append(cur_run)
+
+            for r in runs:
+                dt_run = t[r[-1]] - t[r[0]]
+                if dt_run >= 0.1 - 1e-7:
+                    return float(t[r[0]])
+            return None
+
+        t_onset_i = find_sustained_onset(cond_i)
+        t_onset_ii = find_sustained_onset(cond_ii)
+        t_onset_iii = find_sustained_onset(cond_iii)
+
+        candidates = []
+        if t_onset_i is not None:
+            candidates.append((t_onset_i, "tilt"))
+            res["t_onset_tilt"] = round(t_onset_i, 3)
+        if t_onset_ii is not None:
+            candidates.append((t_onset_ii, "vertical_speed"))
+            res["t_onset_vz"] = round(t_onset_ii, 3)
+        if t_onset_iii is not None:
+            candidates.append((t_onset_iii, "yaw_rate"))
+            res["t_onset_yaw"] = round(t_onset_iii, 3)
+
+        if candidates:
+            candidates.sort(key=lambda x: x[0])
+            res["first_loss_of_control_s"] = round(float(candidates[0][0]), 3)
+            res["loss_of_control_indicator"] = candidates[0][1]
+
+    except Exception as e:
+        print(f"  [WARN] Failed to compute loss of control: {e}")
+
+    return res
+
+
+def classify_warning_timing(
+    t_arm: float | None,
+    first_loc_s: float | None,
+    warnings: list[tuple[float, str]],
+) -> str:
+    """Classify health/failsafe warning timing relative to flight phases and loss of control.
+
+    Returns one of:
+      - 'no_warning': no health/failsafe warning occurred
+      - 'boot_only': warning(s) occurred, but all before arming
+      - 'warning_before_onset': post-arm warning occurred before loss of control onset
+      - 'warning_after_onset': post-arm warning occurred at or after loss of control onset
+      - 'warning_no_onset': post-arm warning occurred, but no loss of control detected
+    """
+    if not warnings:
+        return "no_warning"
+
+    post_arm_warns = []
+    for ts, txt in warnings:
+        if t_arm is not None:
+            if ts >= t_arm:
+                post_arm_warns.append((ts, txt))
+        else:
+            # If flight never armed, any warnings are boot_only
+            pass
+
+    if not post_arm_warns:
+        return "boot_only"
+
+    first_warn_ts = post_arm_warns[0][0]
+    if first_loc_s is not None:
+        if first_warn_ts < first_loc_s:
+            return "warning_before_onset"
+        else:
+            return "warning_after_onset"
+    else:
+        return "warning_no_onset"
+
+
 def compute_tilt_metrics(
     df_gt: pd.DataFrame | None,
     t_arm: float | None = None,
     t_land_cmd: float | None = None,
     t_disarm: float | None = None,
+    yaw_bin: str = "G",
 ) -> dict:
-    """Compute tilt metrics over ground-truth flight telemetry.
+    """Compute tilt and loss of control metrics over ground-truth flight telemetry.
 
     Parameters
     ----------
@@ -237,6 +418,8 @@ def compute_tilt_metrics(
         failsafe land, or disarm). If None, end of dataset is used.
     t_disarm : float | None
         Disarming timestamp in seconds, or None if end of log.
+    yaw_bin : str
+        Yaw rate bin ('G', 'M', 'A', 'E') for commanded rate scaling.
 
     Returns
     -------
@@ -249,19 +432,33 @@ def compute_tilt_metrics(
           (single-sample or touchdown, old crossing diagnostic). Empty string if none.
         - 'max_tilt_inflight_deg': maximum tilt angle in degrees over the
           [t_arm, t_land_cmd] window. Empty string if none.
+        - 'max_tilt_motion_deg': maximum tilt angle in degrees from arming to
+          min(motion_start + 22.0 s, landing command), where
+          motion_start = first z>=2.0 time + 0.65 s. Empty string if none.
         - 'landing_command_s': rounded landing command timestamp, or empty string.
         - 'max_tilt_post_landcmd_deg': maximum tilt angle in degrees from landing
           command to disarm/end of log, all samples. Empty string if none.
         - 'z_at_max_tilt_post_landcmd': pos_z at max_tilt_post_landcmd_deg. Empty string if none.
+        - 'first_loss_of_control_s': earliest onset time among sustained indicators, or empty string.
+        - 'loss_of_control_indicator': name of the earliest indicator, or empty string.
+        - 't_onset_tilt': onset time of indicator (i), or empty string.
+        - 't_onset_vz': onset time of indicator (ii), or empty string.
+        - 't_onset_yaw': onset time of indicator (iii), or empty string.
     """
     res = {
         "first_tilt_exceed_45_s": "",
         "first_tilt_z_m": "",
         "first_tilt_any_s": "",
         "max_tilt_inflight_deg": "",
+        "max_tilt_motion_deg": "",
         "landing_command_s": round(float(t_land_cmd), 3) if t_land_cmd is not None else "",
         "max_tilt_post_landcmd_deg": "",
         "z_at_max_tilt_post_landcmd": "",
+        "first_loss_of_control_s": "",
+        "loss_of_control_indicator": "",
+        "t_onset_tilt": "",
+        "t_onset_vz": "",
+        "t_onset_yaw": "",
     }
     if df_gt is None or len(df_gt) == 0:
         return res
@@ -295,6 +492,23 @@ def compute_tilt_metrics(
         if len(tilt_win) > 0:
             res["max_tilt_inflight_deg"] = round(float(np.max(tilt_win)), 2)
 
+        # Motion window: from arming to min(motion_start + 22.0 s, landing command)
+        idx_z2 = np.where(z_gt >= 2.0)[0]
+        t_z2 = float(t_gt[idx_z2[0]]) if len(idx_z2) > 0 else None
+        motion_start = (t_z2 + 0.65) if t_z2 is not None else None
+
+        if motion_start is not None:
+            t_motion_end = motion_start + 22.0
+            if t_land_cmd is not None:
+                t_motion_end = min(t_motion_end, t_land_cmd)
+            mot_mask = np.ones(len(t_gt), dtype=bool)
+            if t_arm is not None:
+                mot_mask &= (t_gt >= t_arm)
+            mot_mask &= (t_gt <= t_motion_end)
+            tilt_mot = tilt_deg[mot_mask]
+            if len(tilt_mot) > 0:
+                res["max_tilt_motion_deg"] = round(float(np.max(tilt_mot)), 2)
+
         # Post-landing window: from landing command to disarm/end of log, all samples
         if t_land_cmd is not None:
             post_mask = (t_gt >= t_land_cmd)
@@ -327,6 +541,11 @@ def compute_tilt_metrics(
                     res["first_tilt_exceed_45_s"] = round(float(t_win[r[0]]), 3)
                     res["first_tilt_z_m"] = round(float(z_win[r[0]]), 3)
                     break
+
+        # Loss of control indicators
+        loc_res = compute_loss_of_control(df_gt, yaw_bin=yaw_bin, t_arm=t_arm, t_land_cmd=t_land_cmd)
+        res.update(loc_res)
+
     except Exception as e:
         print(f"  [WARN] Failed to compute tilt metrics: {e}")
 
@@ -353,8 +572,15 @@ def check_flight_gates(flight_dir: Path, motion_retcode: int = 0, motion_timed_o
         "first_tilt_z_m": "",
         "first_tilt_any_s": "",
         "max_tilt_inflight_deg": "",
+        "max_tilt_motion_deg": "",
         "max_tilt_post_landcmd_deg": "",
         "z_at_max_tilt_post_landcmd": "",
+        "first_loss_of_control_s": "",
+        "loss_of_control_indicator": "",
+        "t_onset_tilt": "",
+        "t_onset_vz": "",
+        "t_onset_yaw": "",
+        "warning_timing_class": "no_warning",
         "headline_eligible": False,
         "pre_arm_notes": "",
         "combined_pass": True,
@@ -486,6 +712,7 @@ def check_flight_gates(flight_dir: Path, motion_retcode: int = 0, motion_timed_o
         except Exception as e:
             ulog_obj = None
 
+    all_warns = []
     post_arm_warns = []
     pre_notes = []
     t_arm = None
@@ -525,6 +752,8 @@ def check_flight_gates(flight_dir: Path, motion_retcode: int = 0, motion_timed_o
                     if "Preflight Fail: system power unavailable" in line:
                         if "Preflight Fail: system power unavailable" not in pre_notes:
                             pre_notes.append("Preflight Fail: system power unavailable")
+                        if not any("system power unavailable" in w[1] for w in all_warns):
+                            all_warns.insert(0, (0.0, "Preflight Fail: system power unavailable"))
             except Exception:
                 pass
 
@@ -541,6 +770,7 @@ def check_flight_gates(flight_dir: Path, motion_retcode: int = 0, motion_timed_o
                 matched = True
 
             if matched:
+                all_warns.append((ts, text))
                 if t_arm is not None and ts >= t_arm and (t_disarm is None or ts <= t_disarm):
                     post_arm_warns.append((ts, text))
                 elif t_arm is None or ts < t_arm:
@@ -569,6 +799,8 @@ def check_flight_gates(flight_dir: Path, motion_retcode: int = 0, motion_timed_o
                         if "Preflight Fail: system power unavailable" in line:
                             if "Preflight Fail: system power unavailable" not in pre_notes:
                                 pre_notes.append("Preflight Fail: system power unavailable")
+                            if not any("system power unavailable" in w[1] for w in all_warns):
+                                all_warns.insert(0, (0.0, "Preflight Fail: system power unavailable"))
                     else:
                         matched = False
                         for w in HEALTH_WARN_TARGETS:
@@ -578,6 +810,7 @@ def check_flight_gates(flight_dir: Path, motion_retcode: int = 0, motion_timed_o
                         if not matched and "Preflight Fail:" in line:
                             matched = True
                         if matched:
+                            all_warns.append((t_arm if t_arm is not None else 0.0, line.strip()))
                             post_arm_warns.append((None, line.strip()))
             except Exception:
                 pass
@@ -606,23 +839,36 @@ def check_flight_gates(flight_dir: Path, motion_retcode: int = 0, motion_timed_o
     )
     res["combined_pass"] = not active_gates_failed
 
-    # Evaluate tilt metrics whenever ground truth data is available
+    # Evaluate tilt and loss of control metrics whenever ground truth data is available
     if df_gt is not None:
-        tilt_metrics = compute_tilt_metrics(df_gt, t_arm=t_arm, t_land_cmd=t_land_cmd, t_disarm=t_disarm)
+        m_yaw = re.match(r"(?:sweep_)?([GMAE])_", flight_dir.name)
+        yaw_bin = m_yaw.group(1) if m_yaw else "G"
+        tilt_metrics = compute_tilt_metrics(df_gt, t_arm=t_arm, t_land_cmd=t_land_cmd, t_disarm=t_disarm, yaw_bin=yaw_bin)
         res["first_tilt_exceed_45_s"] = tilt_metrics["first_tilt_exceed_45_s"]
         res["first_tilt_z_m"] = tilt_metrics["first_tilt_z_m"]
         res["first_tilt_any_s"] = tilt_metrics["first_tilt_any_s"]
         res["max_tilt_inflight_deg"] = tilt_metrics["max_tilt_inflight_deg"]
+        res["max_tilt_motion_deg"] = tilt_metrics["max_tilt_motion_deg"]
         res["max_tilt_post_landcmd_deg"] = tilt_metrics["max_tilt_post_landcmd_deg"]
         res["z_at_max_tilt_post_landcmd"] = tilt_metrics["z_at_max_tilt_post_landcmd"]
+        res["first_loss_of_control_s"] = tilt_metrics["first_loss_of_control_s"]
+        res["loss_of_control_indicator"] = tilt_metrics["loss_of_control_indicator"]
+        res["t_onset_tilt"] = tilt_metrics["t_onset_tilt"]
+        res["t_onset_vz"] = tilt_metrics["t_onset_vz"]
+        res["t_onset_yaw"] = tilt_metrics["t_onset_yaw"]
         if tilt_metrics["landing_command_s"] != "":
             res["landing_command_s"] = tilt_metrics["landing_command_s"]
 
-    # Headline eligibility (D1)
+    # Warning timing classification (D3)
+    first_loc = res.get("first_loss_of_control_s")
+    first_loc_s = float(first_loc) if first_loc not in ("", None) else None
+    res["warning_timing_class"] = classify_warning_timing(t_arm, first_loc_s, all_warns)
+
+    # Headline eligibility (D1): hardened gates PASS (pre-arm power note ignored) AND max_tilt_motion_deg < 45.0
     tilt_ok = False
-    if res.get("max_tilt_inflight_deg") != "":
+    if res.get("max_tilt_motion_deg") != "":
         try:
-            tilt_ok = float(res["max_tilt_inflight_deg"]) < 45.0
+            tilt_ok = float(res["max_tilt_motion_deg"]) < 45.0
         except (ValueError, TypeError):
             tilt_ok = False
     res["headline_eligible"] = res["combined_pass"] and tilt_ok
@@ -1004,8 +1250,12 @@ def run_flight(
                 "first_tilt_z_m": gate_res.get("first_tilt_z_m", ""),
                 "first_tilt_any_s": gate_res.get("first_tilt_any_s", ""),
                 "max_tilt_inflight_deg": gate_res.get("max_tilt_inflight_deg", ""),
+                "max_tilt_motion_deg": gate_res.get("max_tilt_motion_deg", ""),
                 "max_tilt_post_landcmd_deg": gate_res.get("max_tilt_post_landcmd_deg", ""),
                 "z_at_max_tilt_post_landcmd": gate_res.get("z_at_max_tilt_post_landcmd", ""),
+                "first_loss_of_control_s": gate_res.get("first_loss_of_control_s", ""),
+                "loss_of_control_indicator": gate_res.get("loss_of_control_indicator", ""),
+                "warning_timing_class": gate_res.get("warning_timing_class", ""),
                 "headline_eligible": gate_res.get("headline_eligible", False),
                 "pre_arm_notes": gate_res.get("pre_arm_notes", ""),
                 **stats,
@@ -1061,8 +1311,12 @@ def run_flight(
                 "first_tilt_z_m": gate_res.get("first_tilt_z_m", ""),
                 "first_tilt_any_s": gate_res.get("first_tilt_any_s", ""),
                 "max_tilt_inflight_deg": gate_res.get("max_tilt_inflight_deg", ""),
+                "max_tilt_motion_deg": gate_res.get("max_tilt_motion_deg", ""),
                 "max_tilt_post_landcmd_deg": gate_res.get("max_tilt_post_landcmd_deg", ""),
                 "z_at_max_tilt_post_landcmd": gate_res.get("z_at_max_tilt_post_landcmd", ""),
+                "first_loss_of_control_s": gate_res.get("first_loss_of_control_s", ""),
+                "loss_of_control_indicator": gate_res.get("loss_of_control_indicator", ""),
+                "warning_timing_class": gate_res.get("warning_timing_class", ""),
                 "headline_eligible": gate_res.get("headline_eligible", False),
                 "pre_arm_notes": gate_res.get("pre_arm_notes", ""),
                 **stats,
@@ -1127,8 +1381,12 @@ def run_flight(
         "first_tilt_z_m": last_gate_res.get("first_tilt_z_m", ""),
         "first_tilt_any_s": last_gate_res.get("first_tilt_any_s", ""),
         "max_tilt_inflight_deg": last_gate_res.get("max_tilt_inflight_deg", ""),
+        "max_tilt_motion_deg": last_gate_res.get("max_tilt_motion_deg", ""),
         "max_tilt_post_landcmd_deg": last_gate_res.get("max_tilt_post_landcmd_deg", ""),
         "z_at_max_tilt_post_landcmd": last_gate_res.get("z_at_max_tilt_post_landcmd", ""),
+        "first_loss_of_control_s": last_gate_res.get("first_loss_of_control_s", ""),
+        "loss_of_control_indicator": last_gate_res.get("loss_of_control_indicator", ""),
+        "warning_timing_class": last_gate_res.get("warning_timing_class", ""),
         "headline_eligible": last_gate_res.get("headline_eligible", False),
         "pre_arm_notes": last_gate_res.get("pre_arm_notes", ""),
         **stats,
@@ -1400,8 +1658,12 @@ def main():
                 "first_tilt_z_m": "",
                 "first_tilt_any_s": "",
                 "max_tilt_inflight_deg": "",
+                "max_tilt_motion_deg": "",
                 "max_tilt_post_landcmd_deg": "",
                 "z_at_max_tilt_post_landcmd": "",
+                "first_loss_of_control_s": "",
+                "loss_of_control_indicator": "",
+                "warning_timing_class": "no_warning",
                 "headline_eligible": False,
                 "active_duration_s": 0.0,
                 "active_frames": 0,
