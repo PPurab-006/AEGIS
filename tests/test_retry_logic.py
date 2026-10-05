@@ -528,8 +528,8 @@ class TestRetryLogic(unittest.TestCase):
         tilt_ok3 = float(gate_res_gate_fail["max_tilt_motion_deg"]) < 45.0
         self.assertFalse(gate_res_gate_fail["combined_pass"] and tilt_ok3)
 
-    def test_max_tilt_motion_deg_excludes_return_braking(self):
-        """max_tilt_motion_deg measures tilt from arming to min(motion_start + 22.0s, land_cmd),
+    def test_max_tilt_motion22_deg_excludes_return_braking(self):
+        """max_tilt_motion22_deg measures tilt from arming to min(motion_start + 22.0s, land_cmd),
         excluding return braking spikes occurring before landing command."""
         compute_tilt_metrics = batch_module.compute_tilt_metrics
         t_arr = np.arange(10.0, 50.0, 0.02)
@@ -555,8 +555,39 @@ class TestRetryLogic(unittest.TestCase):
         })
 
         metrics = compute_tilt_metrics(df_gt, t_arm=10.0, t_land_cmd=42.0)
-        self.assertEqual(metrics["max_tilt_motion_deg"], 5.0, "max_tilt_motion_deg must exclude return braking spike")
+        self.assertEqual(metrics["max_tilt_motion22_deg"], 5.0, "max_tilt_motion22_deg must exclude return braking spike")
         self.assertEqual(metrics["max_tilt_inflight_deg"], 43.2, "max_tilt_inflight_deg must include full in-flight window")
+
+    def test_max_tilt_motion_excludes_ramp_after_return_start(self):
+        """Unit test: synthetic data where a tilt ramp begins after t_return_start
+        (t_land_cmd - 1.5s) and must be excluded from max_tilt_motion_deg."""
+        compute_tilt_metrics = batch_module.compute_tilt_metrics
+        t_arr = np.arange(10.0, 50.0, 0.02)
+        tilts = np.full(len(t_arr), 5.0)
+        z_arr = np.full(len(t_arr), 2.5)
+
+        # Landing command at t=42.0s => t_return_start = 40.5s.
+        # Tilt ramp begins after return start at t = 40.8s to 41.8s, reaching 65.0 deg.
+        ramp_mask = (t_arr >= 40.8) & (t_arr <= 41.8)
+        tilts[ramp_mask] = np.linspace(10.0, 65.0, int(np.sum(ramp_mask)))
+
+        quats = R_scipy.from_euler("x", tilts[:, None], degrees=True).as_quat()
+        df_gt = pd.DataFrame({
+            "sample_idx": np.arange(len(t_arr)),
+            "timestamp_total_sec": t_arr,
+            "pos_x": 0.0,
+            "pos_y": 0.0,
+            "pos_z": z_arr,
+            "rot_x": quats[:, 0],
+            "rot_y": quats[:, 1],
+            "rot_z": quats[:, 2],
+            "rot_w": quats[:, 3],
+        })
+
+        metrics = compute_tilt_metrics(df_gt, t_arm=10.0, t_land_cmd=42.0)
+        self.assertEqual(metrics["t_return_start_s"], 40.5, "t_return_start_s must be t_land_cmd - 1.5s")
+        self.assertEqual(metrics["max_tilt_motion_deg"], 5.0, "max_tilt_motion_deg must exclude ramp after t_return_start")
+        self.assertEqual(metrics["max_tilt_inflight_deg"], 65.0, "max_tilt_inflight_deg must capture in-flight ramp before landing command")
 
     def test_indicators_single_sample_spike_must_not_trigger(self):
         """Single-sample spikes must NOT trigger each loss-of-control indicator."""

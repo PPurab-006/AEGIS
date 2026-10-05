@@ -433,8 +433,12 @@ def compute_tilt_metrics(
         - 'max_tilt_inflight_deg': maximum tilt angle in degrees over the
           [t_arm, t_land_cmd] window. Empty string if none.
         - 'max_tilt_motion_deg': maximum tilt angle in degrees from arming to
+          min(t_return_start, landing command), where
+          t_return_start = t_land_cmd - 1.5 s. Empty string if none.
+        - 'max_tilt_motion22_deg': maximum tilt angle in degrees from arming to
           min(motion_start + 22.0 s, landing command), where
           motion_start = first z>=2.0 time + 0.65 s. Empty string if none.
+        - 't_return_start_s': return start timestamp (t_land_cmd - 1.5 s), or empty string.
         - 'landing_command_s': rounded landing command timestamp, or empty string.
         - 'max_tilt_post_landcmd_deg': maximum tilt angle in degrees from landing
           command to disarm/end of log, all samples. Empty string if none.
@@ -451,6 +455,8 @@ def compute_tilt_metrics(
         "first_tilt_any_s": "",
         "max_tilt_inflight_deg": "",
         "max_tilt_motion_deg": "",
+        "max_tilt_motion22_deg": "",
+        "t_return_start_s": "",
         "landing_command_s": round(float(t_land_cmd), 3) if t_land_cmd is not None else "",
         "max_tilt_post_landcmd_deg": "",
         "z_at_max_tilt_post_landcmd": "",
@@ -492,15 +498,11 @@ def compute_tilt_metrics(
         if len(tilt_win) > 0:
             res["max_tilt_inflight_deg"] = round(float(np.max(tilt_win)), 2)
 
-        # Motion window: from arming to min(motion_start + 22.0 s, landing command)
-        idx_z2 = np.where(z_gt >= 2.0)[0]
-        t_z2 = float(t_gt[idx_z2[0]]) if len(idx_z2) > 0 else None
-        motion_start = (t_z2 + 0.65) if t_z2 is not None else None
-
-        if motion_start is not None:
-            t_motion_end = motion_start + 22.0
-            if t_land_cmd is not None:
-                t_motion_end = min(t_motion_end, t_land_cmd)
+        # Motion window (return start): from arming to min(t_return_start, t_land_cmd)
+        t_return_start = (t_land_cmd - 1.5) if t_land_cmd is not None else None
+        if t_return_start is not None:
+            res["t_return_start_s"] = round(float(t_return_start), 3)
+            t_motion_end = min(t_return_start, t_land_cmd) if t_land_cmd is not None else t_return_start
             mot_mask = np.ones(len(t_gt), dtype=bool)
             if t_arm is not None:
                 mot_mask &= (t_gt >= t_arm)
@@ -508,6 +510,23 @@ def compute_tilt_metrics(
             tilt_mot = tilt_deg[mot_mask]
             if len(tilt_mot) > 0:
                 res["max_tilt_motion_deg"] = round(float(np.max(tilt_mot)), 2)
+
+        # Old motion+22 s window: from arming to min(motion_start + 22.0 s, landing command)
+        idx_z2 = np.where(z_gt >= 2.0)[0]
+        t_z2 = float(t_gt[idx_z2[0]]) if len(idx_z2) > 0 else None
+        motion_start = (t_z2 + 0.65) if t_z2 is not None else None
+
+        if motion_start is not None:
+            t_motion_end_22 = motion_start + 22.0
+            if t_land_cmd is not None:
+                t_motion_end_22 = min(t_motion_end_22, t_land_cmd)
+            mot_mask_22 = np.ones(len(t_gt), dtype=bool)
+            if t_arm is not None:
+                mot_mask_22 &= (t_gt >= t_arm)
+            mot_mask_22 &= (t_gt <= t_motion_end_22)
+            tilt_mot_22 = tilt_deg[mot_mask_22]
+            if len(tilt_mot_22) > 0:
+                res["max_tilt_motion22_deg"] = round(float(np.max(tilt_mot_22)), 2)
 
         # Post-landing window: from landing command to disarm/end of log, all samples
         if t_land_cmd is not None:
@@ -573,6 +592,8 @@ def check_flight_gates(flight_dir: Path, motion_retcode: int = 0, motion_timed_o
         "first_tilt_any_s": "",
         "max_tilt_inflight_deg": "",
         "max_tilt_motion_deg": "",
+        "max_tilt_motion22_deg": "",
+        "t_return_start_s": "",
         "max_tilt_post_landcmd_deg": "",
         "z_at_max_tilt_post_landcmd": "",
         "first_loss_of_control_s": "",
@@ -849,6 +870,8 @@ def check_flight_gates(flight_dir: Path, motion_retcode: int = 0, motion_timed_o
         res["first_tilt_any_s"] = tilt_metrics["first_tilt_any_s"]
         res["max_tilt_inflight_deg"] = tilt_metrics["max_tilt_inflight_deg"]
         res["max_tilt_motion_deg"] = tilt_metrics["max_tilt_motion_deg"]
+        res["max_tilt_motion22_deg"] = tilt_metrics["max_tilt_motion22_deg"]
+        res["t_return_start_s"] = tilt_metrics["t_return_start_s"]
         res["max_tilt_post_landcmd_deg"] = tilt_metrics["max_tilt_post_landcmd_deg"]
         res["z_at_max_tilt_post_landcmd"] = tilt_metrics["z_at_max_tilt_post_landcmd"]
         res["first_loss_of_control_s"] = tilt_metrics["first_loss_of_control_s"]
@@ -1251,6 +1274,8 @@ def run_flight(
                 "first_tilt_any_s": gate_res.get("first_tilt_any_s", ""),
                 "max_tilt_inflight_deg": gate_res.get("max_tilt_inflight_deg", ""),
                 "max_tilt_motion_deg": gate_res.get("max_tilt_motion_deg", ""),
+                "max_tilt_motion22_deg": gate_res.get("max_tilt_motion22_deg", ""),
+                "t_return_start_s": gate_res.get("t_return_start_s", ""),
                 "max_tilt_post_landcmd_deg": gate_res.get("max_tilt_post_landcmd_deg", ""),
                 "z_at_max_tilt_post_landcmd": gate_res.get("z_at_max_tilt_post_landcmd", ""),
                 "first_loss_of_control_s": gate_res.get("first_loss_of_control_s", ""),
@@ -1312,6 +1337,8 @@ def run_flight(
                 "first_tilt_any_s": gate_res.get("first_tilt_any_s", ""),
                 "max_tilt_inflight_deg": gate_res.get("max_tilt_inflight_deg", ""),
                 "max_tilt_motion_deg": gate_res.get("max_tilt_motion_deg", ""),
+                "max_tilt_motion22_deg": gate_res.get("max_tilt_motion22_deg", ""),
+                "t_return_start_s": gate_res.get("t_return_start_s", ""),
                 "max_tilt_post_landcmd_deg": gate_res.get("max_tilt_post_landcmd_deg", ""),
                 "z_at_max_tilt_post_landcmd": gate_res.get("z_at_max_tilt_post_landcmd", ""),
                 "first_loss_of_control_s": gate_res.get("first_loss_of_control_s", ""),
@@ -1382,6 +1409,8 @@ def run_flight(
         "first_tilt_any_s": last_gate_res.get("first_tilt_any_s", ""),
         "max_tilt_inflight_deg": last_gate_res.get("max_tilt_inflight_deg", ""),
         "max_tilt_motion_deg": last_gate_res.get("max_tilt_motion_deg", ""),
+        "max_tilt_motion22_deg": last_gate_res.get("max_tilt_motion22_deg", ""),
+        "t_return_start_s": last_gate_res.get("t_return_start_s", ""),
         "max_tilt_post_landcmd_deg": last_gate_res.get("max_tilt_post_landcmd_deg", ""),
         "z_at_max_tilt_post_landcmd": last_gate_res.get("z_at_max_tilt_post_landcmd", ""),
         "first_loss_of_control_s": last_gate_res.get("first_loss_of_control_s", ""),
@@ -1659,6 +1688,8 @@ def main():
                 "first_tilt_any_s": "",
                 "max_tilt_inflight_deg": "",
                 "max_tilt_motion_deg": "",
+                "max_tilt_motion22_deg": "",
+                "t_return_start_s": "",
                 "max_tilt_post_landcmd_deg": "",
                 "z_at_max_tilt_post_landcmd": "",
                 "first_loss_of_control_s": "",
