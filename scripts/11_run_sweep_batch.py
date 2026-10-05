@@ -397,12 +397,70 @@ def classify_warning_timing(
         return "warning_no_onset"
 
 
+NOMINAL_SCRIPT_FLIGHT_TIME_S = 31.22
+
+
+def determine_landing_script_initiated(
+    flight_dir: Path | None = None,
+    t_arm: float | None = None,
+    t_land_cmd: float | None = None,
+    warnings: list[tuple[float, str]] | None = None,
+    nominal_flight_time_s: float = NOMINAL_SCRIPT_FLIGHT_TIME_S,
+) -> bool:
+    """Determine whether landing was initiated by the nominal mission script.
+
+    Parameters
+    ----------
+    flight_dir : Path | None
+        Directory of the flight attempt. If motion.log is present, it is checked
+        for [EVENT: RETURN_START] (and absence of [EVENT: SAFETY_ABORT]).
+    t_arm : float | None
+        Arming timestamp in seconds.
+    t_land_cmd : float | None
+        Landing command timestamp in seconds.
+    warnings : list[tuple[float, str]] | None
+        List of (timestamp, message) health/failsafe warnings.
+    nominal_flight_time_s : float
+        Nominal script flight duration from arming to land command (default: 31.22s).
+
+    Returns
+    -------
+    bool
+        True if landing was script-initiated, False otherwise.
+    """
+    if flight_dir is not None:
+        motion_log = Path(flight_dir) / "motion.log"
+        if motion_log.exists():
+            try:
+                txt = motion_log.read_text(errors="replace")
+                return ("[EVENT: RETURN_START]" in txt) and ("[EVENT: SAFETY_ABORT]" not in txt)
+            except Exception:
+                return False
+
+    if t_arm is None or t_land_cmd is None:
+        return False
+
+    diff_timing = abs(t_land_cmd - (t_arm + nominal_flight_time_s))
+    within_timing = diff_timing <= 0.3
+
+    no_preceding_warn = True
+    if warnings:
+        for item in warnings:
+            ts = item[0] if isinstance(item, (tuple, list)) else getattr(item, "timestamp", None)
+            if ts is not None and (t_land_cmd - 1.0 <= ts <= t_land_cmd):
+                no_preceding_warn = False
+                break
+
+    return within_timing and no_preceding_warn
+
+
 def compute_tilt_metrics(
     df_gt: pd.DataFrame | None,
     t_arm: float | None = None,
     t_land_cmd: float | None = None,
     t_disarm: float | None = None,
     yaw_bin: str = "G",
+    landing_script_initiated: bool = True,
 ) -> dict:
     """Compute tilt and loss of control metrics over ground-truth flight telemetry.
 
@@ -420,6 +478,9 @@ def compute_tilt_metrics(
         Disarming timestamp in seconds, or None if end of log.
     yaw_bin : str
         Yaw rate bin ('G', 'M', 'A', 'E') for commanded rate scaling.
+    landing_script_initiated : bool
+        Whether landing was initiated by nominal script. When False,
+        max_tilt_motion_deg covers arming..landing command and t_return_start_s is empty.
 
     Returns
     -------
@@ -433,12 +494,14 @@ def compute_tilt_metrics(
         - 'max_tilt_inflight_deg': maximum tilt angle in degrees over the
           [t_arm, t_land_cmd] window. Empty string if none.
         - 'max_tilt_motion_deg': maximum tilt angle in degrees from arming to
-          min(t_return_start, landing command), where
-          t_return_start = t_land_cmd - 1.5 s. Empty string if none.
+          min(t_return_start, landing command) if landing_script_initiated is True;
+          if False, maximum tilt over arming..landing command. Empty string if none.
         - 'max_tilt_motion22_deg': maximum tilt angle in degrees from arming to
           min(motion_start + 22.0 s, landing command), where
           motion_start = first z>=2.0 time + 0.65 s. Empty string if none.
-        - 't_return_start_s': return start timestamp (t_land_cmd - 1.5 s), or empty string.
+        - 't_return_start_s': return start timestamp (t_land_cmd - 1.5 s) if
+          landing_script_initiated is True, or empty string if False.
+        - 'landing_script_initiated': boolean flag indicating if landing was script-initiated.
         - 'landing_command_s': rounded landing command timestamp, or empty string.
         - 'max_tilt_post_landcmd_deg': maximum tilt angle in degrees from landing
           command to disarm/end of log, all samples. Empty string if none.
@@ -457,6 +520,7 @@ def compute_tilt_metrics(
         "max_tilt_motion_deg": "",
         "max_tilt_motion22_deg": "",
         "t_return_start_s": "",
+        "landing_script_initiated": landing_script_initiated,
         "landing_command_s": round(float(t_land_cmd), 3) if t_land_cmd is not None else "",
         "max_tilt_post_landcmd_deg": "",
         "z_at_max_tilt_post_landcmd": "",
@@ -499,17 +563,23 @@ def compute_tilt_metrics(
             res["max_tilt_inflight_deg"] = round(float(np.max(tilt_win)), 2)
 
         # Motion window (return start): from arming to min(t_return_start, t_land_cmd)
-        t_return_start = (t_land_cmd - 1.5) if t_land_cmd is not None else None
-        if t_return_start is not None:
-            res["t_return_start_s"] = round(float(t_return_start), 3)
-            t_motion_end = min(t_return_start, t_land_cmd) if t_land_cmd is not None else t_return_start
-            mot_mask = np.ones(len(t_gt), dtype=bool)
-            if t_arm is not None:
-                mot_mask &= (t_gt >= t_arm)
-            mot_mask &= (t_gt <= t_motion_end)
-            tilt_mot = tilt_deg[mot_mask]
-            if len(tilt_mot) > 0:
-                res["max_tilt_motion_deg"] = round(float(np.max(tilt_mot)), 2)
+        if landing_script_initiated:
+            t_return_start = (t_land_cmd - 1.5) if t_land_cmd is not None else None
+            if t_return_start is not None:
+                res["t_return_start_s"] = round(float(t_return_start), 3)
+                t_motion_end = min(t_return_start, t_land_cmd) if t_land_cmd is not None else t_return_start
+                mot_mask = np.ones(len(t_gt), dtype=bool)
+                if t_arm is not None:
+                    mot_mask &= (t_gt >= t_arm)
+                mot_mask &= (t_gt <= t_motion_end)
+                tilt_mot = tilt_deg[mot_mask]
+                if len(tilt_mot) > 0:
+                    res["max_tilt_motion_deg"] = round(float(np.max(tilt_mot)), 2)
+        else:
+            res["t_return_start_s"] = ""
+            res["max_tilt_motion_deg"] = res["max_tilt_inflight_deg"]
+
+        res["landing_script_initiated"] = landing_script_initiated
 
         # Old motion+22 s window: from arming to min(motion_start + 22.0 s, landing command)
         idx_z2 = np.where(z_gt >= 2.0)[0]
@@ -864,7 +934,15 @@ def check_flight_gates(flight_dir: Path, motion_retcode: int = 0, motion_timed_o
     if df_gt is not None:
         m_yaw = re.match(r"(?:sweep_)?([GMAE])_", flight_dir.name)
         yaw_bin = m_yaw.group(1) if m_yaw else "G"
-        tilt_metrics = compute_tilt_metrics(df_gt, t_arm=t_arm, t_land_cmd=t_land_cmd, t_disarm=t_disarm, yaw_bin=yaw_bin)
+        lsi = determine_landing_script_initiated(flight_dir, t_arm=t_arm, t_land_cmd=t_land_cmd, warnings=all_warns)
+        tilt_metrics = compute_tilt_metrics(
+            df_gt,
+            t_arm=t_arm,
+            t_land_cmd=t_land_cmd,
+            t_disarm=t_disarm,
+            yaw_bin=yaw_bin,
+            landing_script_initiated=lsi,
+        )
         res["first_tilt_exceed_45_s"] = tilt_metrics["first_tilt_exceed_45_s"]
         res["first_tilt_z_m"] = tilt_metrics["first_tilt_z_m"]
         res["first_tilt_any_s"] = tilt_metrics["first_tilt_any_s"]
@@ -872,6 +950,7 @@ def check_flight_gates(flight_dir: Path, motion_retcode: int = 0, motion_timed_o
         res["max_tilt_motion_deg"] = tilt_metrics["max_tilt_motion_deg"]
         res["max_tilt_motion22_deg"] = tilt_metrics["max_tilt_motion22_deg"]
         res["t_return_start_s"] = tilt_metrics["t_return_start_s"]
+        res["landing_script_initiated"] = tilt_metrics["landing_script_initiated"]
         res["max_tilt_post_landcmd_deg"] = tilt_metrics["max_tilt_post_landcmd_deg"]
         res["z_at_max_tilt_post_landcmd"] = tilt_metrics["z_at_max_tilt_post_landcmd"]
         res["first_loss_of_control_s"] = tilt_metrics["first_loss_of_control_s"]
@@ -1276,6 +1355,7 @@ def run_flight(
                 "max_tilt_motion_deg": gate_res.get("max_tilt_motion_deg", ""),
                 "max_tilt_motion22_deg": gate_res.get("max_tilt_motion22_deg", ""),
                 "t_return_start_s": gate_res.get("t_return_start_s", ""),
+                "landing_script_initiated": gate_res.get("landing_script_initiated", True),
                 "max_tilt_post_landcmd_deg": gate_res.get("max_tilt_post_landcmd_deg", ""),
                 "z_at_max_tilt_post_landcmd": gate_res.get("z_at_max_tilt_post_landcmd", ""),
                 "first_loss_of_control_s": gate_res.get("first_loss_of_control_s", ""),
@@ -1339,6 +1419,7 @@ def run_flight(
                 "max_tilt_motion_deg": gate_res.get("max_tilt_motion_deg", ""),
                 "max_tilt_motion22_deg": gate_res.get("max_tilt_motion22_deg", ""),
                 "t_return_start_s": gate_res.get("t_return_start_s", ""),
+                "landing_script_initiated": gate_res.get("landing_script_initiated", True),
                 "max_tilt_post_landcmd_deg": gate_res.get("max_tilt_post_landcmd_deg", ""),
                 "z_at_max_tilt_post_landcmd": gate_res.get("z_at_max_tilt_post_landcmd", ""),
                 "first_loss_of_control_s": gate_res.get("first_loss_of_control_s", ""),
@@ -1411,6 +1492,7 @@ def run_flight(
         "max_tilt_motion_deg": last_gate_res.get("max_tilt_motion_deg", ""),
         "max_tilt_motion22_deg": last_gate_res.get("max_tilt_motion22_deg", ""),
         "t_return_start_s": last_gate_res.get("t_return_start_s", ""),
+        "landing_script_initiated": last_gate_res.get("landing_script_initiated", False),
         "max_tilt_post_landcmd_deg": last_gate_res.get("max_tilt_post_landcmd_deg", ""),
         "z_at_max_tilt_post_landcmd": last_gate_res.get("z_at_max_tilt_post_landcmd", ""),
         "first_loss_of_control_s": last_gate_res.get("first_loss_of_control_s", ""),

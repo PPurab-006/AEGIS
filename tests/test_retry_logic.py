@@ -747,6 +747,86 @@ class TestRetryLogic(unittest.TestCase):
         warn_no_loc = [(18.0, "Imbalanced propeller detected")]
         self.assertEqual(classify(10.0, None, warn_no_loc), "warning_no_onset")
 
+    def test_landing_script_initiated_false_behavior(self):
+        """When landing_script_initiated is False:
+        - max_tilt_motion_deg must equal max_tilt_inflight_deg (covering arming..landing command)
+        - t_return_start_s must be empty string
+        - landing_script_initiated must be False.
+        """
+        compute_tilt_metrics = batch_module.compute_tilt_metrics
+        t_arr = np.arange(10.0, 50.0, 0.02)
+        tilts = np.full(len(t_arr), 5.0)
+        z_arr = np.full(len(t_arr), 2.5)
+
+        # Landing command at 42.0s => t_return_start = 40.5s.
+        # Tilt ramp starts after return start (at 40.8s) reaching 65.0 deg.
+        ramp_mask = (t_arr >= 40.8) & (t_arr <= 41.8)
+        tilts[ramp_mask] = np.linspace(10.0, 65.0, int(np.sum(ramp_mask)))
+
+        quats = R_scipy.from_euler("x", tilts[:, None], degrees=True).as_quat()
+        df_gt = pd.DataFrame({
+            "sample_idx": np.arange(len(t_arr)),
+            "timestamp_total_sec": t_arr,
+            "pos_x": 0.0,
+            "pos_y": 0.0,
+            "pos_z": z_arr,
+            "rot_x": quats[:, 0], "rot_y": quats[:, 1], "rot_z": quats[:, 2], "rot_w": quats[:, 3],
+        })
+
+        # Test landing_script_initiated=False
+        m_false = compute_tilt_metrics(df_gt, t_arm=10.0, t_land_cmd=42.0, landing_script_initiated=False)
+        self.assertFalse(m_false["landing_script_initiated"])
+        self.assertEqual(m_false["t_return_start_s"], "", "t_return_start_s must be empty when False")
+        self.assertEqual(m_false["max_tilt_motion_deg"], 65.0, "max_tilt_motion_deg must equal max_tilt_inflight_deg")
+        self.assertEqual(m_false["max_tilt_inflight_deg"], 65.0)
+
+        # Test landing_script_initiated=True
+        m_true = compute_tilt_metrics(df_gt, t_arm=10.0, t_land_cmd=42.0, landing_script_initiated=True)
+        self.assertTrue(m_true["landing_script_initiated"])
+        self.assertEqual(m_true["t_return_start_s"], 40.5)
+        self.assertEqual(m_true["max_tilt_motion_deg"], 5.0, "max_tilt_motion_deg must exclude ramp after t_return_start")
+
+    def test_determine_landing_script_initiated(self):
+        """Test determine_landing_script_initiated logic:
+        - motion.log with RETURN_START vs SAFETY_ABORT
+        - historical without motion.log: nominal timing +-0.3s and warning within 1.0s.
+        """
+        det = batch_module.determine_landing_script_initiated
+        flight_dir = self.temp_path / "test_flight"
+        flight_dir.mkdir(parents=True, exist_ok=True)
+
+        # 1. New flight: motion.log with [EVENT: RETURN_START] -> True
+        motion_log = flight_dir / "motion.log"
+        motion_log.write_text("[EVENT: MOTION_START]\n[EVENT: RETURN_START] Motion sequence finished.\n")
+        self.assertTrue(det(flight_dir, t_arm=10.0, t_land_cmd=42.0, warnings=[]))
+
+        # 2. New flight: motion.log with [EVENT: SAFETY_ABORT] -> False
+        motion_log.write_text("[EVENT: MOTION_START]\n[EVENT: SAFETY_ABORT] Bounds breached!\n[EVENT: RETURN_START]\n")
+        self.assertFalse(det(flight_dir, t_arm=10.0, t_land_cmd=42.0, warnings=[]))
+
+        # Remove motion.log for historical flight tests
+        motion_log.unlink()
+
+        # 3. Historical flight: on nominal timing (31.22s after arming), no warnings -> True
+        t_arm = 10.0
+        t_land_nom = t_arm + 31.22
+        self.assertTrue(det(flight_dir, t_arm=t_arm, t_land_cmd=t_land_nom, warnings=[]))
+        self.assertTrue(det(flight_dir, t_arm=t_arm, t_land_cmd=t_land_nom + 0.25, warnings=[]))
+        self.assertTrue(det(flight_dir, t_arm=t_arm, t_land_cmd=t_land_nom - 0.25, warnings=[]))
+
+        # 4. Historical flight: off nominal timing (> 0.3s diff) -> False
+        self.assertFalse(det(flight_dir, t_arm=t_arm, t_land_cmd=t_land_nom - 2.0, warnings=[]))
+        self.assertFalse(det(flight_dir, t_arm=t_arm, t_land_cmd=t_land_nom + 0.8, warnings=[]))
+
+        # 5. Historical flight: on nominal timing, but warning within 1.0s before landing -> False
+        warn_near = [(t_land_nom - 0.5, "Compass needs calibration - Land now!")]
+        self.assertFalse(det(flight_dir, t_arm=t_arm, t_land_cmd=t_land_nom, warnings=warn_near))
+
+        # 6. Historical flight: on nominal timing, warning > 1.0s before landing -> True
+        warn_early = [(t_land_nom - 5.0, "Attitude failure (roll)")]
+        self.assertTrue(det(flight_dir, t_arm=t_arm, t_land_cmd=t_land_nom, warnings=warn_early))
+
 
 if __name__ == "__main__":
     unittest.main()
+

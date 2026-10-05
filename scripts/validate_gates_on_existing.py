@@ -42,10 +42,12 @@ try:
     compute_tilt_metrics = batch_module.compute_tilt_metrics
     classify_warning_timing = batch_module.classify_warning_timing
     compute_loss_of_control = batch_module.compute_loss_of_control
+    determine_landing_script_initiated = batch_module.determine_landing_script_initiated
 except Exception:
     compute_tilt_metrics = None
     classify_warning_timing = None
     compute_loss_of_control = None
+    determine_landing_script_initiated = None
 
 PX4_DIR = os.environ.get("PX4_DIR", str(Path.home() / "PX4-Autopilot"))
 
@@ -370,7 +372,23 @@ def evaluate_flight(flight_dir: Path, attempt_num: int) -> dict:
         if compute_tilt_metrics is not None:
             m_yaw = re.match(r"sweep_([GMAE])_", flight_dir.name)
             yaw_bin = m_yaw.group(1) if m_yaw else "G"
-            tm = compute_tilt_metrics(df_gt, t_arm=t_arm, t_land_cmd=t_land_cmd, t_disarm=t_disarm, yaw_bin=yaw_bin)
+            lsi = True
+            if determine_landing_script_initiated is not None:
+                lsi = determine_landing_script_initiated(
+                    flight_dir=flight_dir,
+                    t_arm=t_arm,
+                    t_land_cmd=t_land_cmd,
+                    warnings=all_warns,
+                )
+            result["landing_script_initiated"] = lsi
+            tm = compute_tilt_metrics(
+                df_gt,
+                t_arm=t_arm,
+                t_land_cmd=t_land_cmd,
+                t_disarm=t_disarm,
+                yaw_bin=yaw_bin,
+                landing_script_initiated=lsi,
+            )
             result["first_tilt_exceed_45_s"] = str(tm["first_tilt_exceed_45_s"]) if tm["first_tilt_exceed_45_s"] != "" else "-"
             result["first_tilt_z_m"] = str(tm["first_tilt_z_m"]) if tm["first_tilt_z_m"] != "" else "-"
             result["max_tilt_inflight_deg"] = str(tm["max_tilt_inflight_deg"]) if tm["max_tilt_inflight_deg"] != "" else "-"
@@ -378,6 +396,7 @@ def evaluate_flight(flight_dir: Path, attempt_num: int) -> dict:
             result["max_tilt_motion22_deg"] = str(tm.get("max_tilt_motion22_deg", "")) if tm.get("max_tilt_motion22_deg", "") != "" else "-"
             result["t_return_start_s"] = str(tm.get("t_return_start_s", "")) if tm.get("t_return_start_s", "") != "" else "-"
             result["landing_command_s"] = str(tm["landing_command_s"]) if tm["landing_command_s"] != "" else "-"
+            result["landing_script_initiated"] = tm.get("landing_script_initiated", lsi)
             result["first_tilt_any_s"] = str(tm["first_tilt_any_s"]) if tm["first_tilt_any_s"] != "" else "-"
             result["max_tilt_post_landcmd_deg"] = str(tm.get("max_tilt_post_landcmd_deg", "")) if tm.get("max_tilt_post_landcmd_deg", "") != "" else "-"
             result["z_at_max_tilt_post_landcmd"] = str(tm.get("z_at_max_tilt_post_landcmd", "")) if tm.get("z_at_max_tilt_post_landcmd", "") != "" else "-"
@@ -456,12 +475,12 @@ def main():
 
     # Format Validator Markdown Table
     headers = [
-        "flight", "att", "max_motion", "max_mot22", "max_inflight", "first_tilt_exceed_45_s", "z_cross",
+        "flight", "att", "script_init", "max_motion", "max_mot22", "max_inflight", "first_tilt_exceed_45_s", "z_cross",
         "ret_start_s", "land_cmd_s", "max_tilt_post", "z_max_post", "old_tilt_z2", "first_any_s",
         "dur_gate", "env_gate", "failsafe", "warn_gate", "headline_eligible"
     ]
     keys = [
-        "flight", "attempt", "max_tilt_motion_deg", "max_tilt_motion22_deg", "max_tilt_inflight_deg", "first_tilt_exceed_45_s", "first_tilt_z_m",
+        "flight", "attempt", "landing_script_initiated", "max_tilt_motion_deg", "max_tilt_motion22_deg", "max_tilt_inflight_deg", "first_tilt_exceed_45_s", "first_tilt_z_m",
         "t_return_start_s", "landing_command_s", "max_tilt_post_landcmd_deg", "z_at_max_tilt_post_landcmd", "old_max_tilt_z2", "first_tilt_any_s",
         "duration_gate", "envelope_gate", "failsafe_gate", "warn_gate", "headline_eligible"
     ]
@@ -479,22 +498,23 @@ def main():
         vals = [
             str(r["flight"]).ljust(col_widths[0]),
             str(r["attempt"]).center(col_widths[1]),
-            str(r["max_tilt_motion_deg"]).center(col_widths[2]),
-            str(r["max_tilt_motion22_deg"]).center(col_widths[3]),
-            str(r["max_tilt_inflight_deg"]).center(col_widths[4]),
-            str(r["first_tilt_exceed_45_s"]).center(col_widths[5]),
-            str(r["first_tilt_z_m"]).center(col_widths[6]),
-            str(r["t_return_start_s"]).center(col_widths[7]),
-            str(r["landing_command_s"]).center(col_widths[8]),
-            str(r["max_tilt_post_landcmd_deg"]).center(col_widths[9]),
-            str(r["z_at_max_tilt_post_landcmd"]).center(col_widths[10]),
-            str(r["old_max_tilt_z2"]).center(col_widths[11]),
-            str(r["first_tilt_any_s"]).center(col_widths[12]),
-            str(r["duration_gate"]).ljust(col_widths[13]),
-            str(r["envelope_gate"]).ljust(col_widths[14]),
-            str(r["failsafe_gate"]).ljust(col_widths[15]),
-            str(r["warn_gate"]).ljust(col_widths[16]),
-            str(r["headline_eligible"]).center(col_widths[17]),
+            str(r.get("landing_script_initiated", True)).center(col_widths[2]),
+            str(r["max_tilt_motion_deg"]).center(col_widths[3]),
+            str(r["max_tilt_motion22_deg"]).center(col_widths[4]),
+            str(r["max_tilt_inflight_deg"]).center(col_widths[5]),
+            str(r["first_tilt_exceed_45_s"]).center(col_widths[6]),
+            str(r["first_tilt_z_m"]).center(col_widths[7]),
+            str(r["t_return_start_s"]).center(col_widths[8]),
+            str(r["landing_command_s"]).center(col_widths[9]),
+            str(r["max_tilt_post_landcmd_deg"]).center(col_widths[10]),
+            str(r["z_at_max_tilt_post_landcmd"]).center(col_widths[11]),
+            str(r["old_max_tilt_z2"]).center(col_widths[12]),
+            str(r["first_tilt_any_s"]).center(col_widths[13]),
+            str(r["duration_gate"]).ljust(col_widths[14]),
+            str(r["envelope_gate"]).ljust(col_widths[15]),
+            str(r["failsafe_gate"]).ljust(col_widths[16]),
+            str(r["warn_gate"]).ljust(col_widths[17]),
+            str(r["headline_eligible"]).center(col_widths[18]),
         ]
         print(" | ".join(vals))
 
@@ -532,6 +552,11 @@ def main():
         except Exception:
             pass
         print(f"  - {r['flight']}: {'; '.join(reasons)}")
+
+    false_lsi = [r for r in results if not r.get("landing_script_initiated", True)]
+    print(f"\nLanding Script Initiated == False ({len(false_lsi)} flights):")
+    for r in false_lsi:
+        print(f"  - {r['flight']}: landing_command={r.get('landing_command_s')}, max_tilt_motion={r.get('max_tilt_motion_deg')}")
 
     # Part 3 Calibration Table
     print("\n" + "="*80)
