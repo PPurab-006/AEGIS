@@ -27,7 +27,9 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+import numpy as np
 import pandas as pd
+from scipy.spatial.transform import Rotation as R_scipy
 
 # Import 11_run_sweep_batch via importlib due to leading digits
 batch_module = importlib.import_module("scripts.11_run_sweep_batch")
@@ -371,6 +373,100 @@ class TestRetryLogic(unittest.TestCase):
         # Assert no _attempt directory was created
         attempt_dirs = list(self.dataset_dir.glob(f"{flight_name}_attempt*"))
         self.assertEqual(len(attempt_dirs), 0, f"No _attempt dir should be created, found: {attempt_dirs}")
+
+    def test_tilt_single_sample_spike_not_counted(self):
+        """(a) Single-sample spike must NOT count as a sustained tilt excursion."""
+        compute_tilt_metrics = batch_module.compute_tilt_metrics
+        t_arr = np.arange(10.0, 50.0, 0.02)
+        tilts = np.zeros(len(t_arr))
+        z_arr = np.full(len(t_arr), 2.5)
+
+        # Single-sample spike at t = 20.0s
+        spike_idx = np.argmin(np.abs(t_arr - 20.0))
+        tilts[spike_idx] = 60.0
+
+        quats = R_scipy.from_euler("x", tilts[:, None], degrees=True).as_quat()
+        df_gt = pd.DataFrame({
+            "sample_idx": np.arange(len(t_arr)),
+            "timestamp_total_sec": t_arr,
+            "pos_x": 0.0,
+            "pos_y": 0.0,
+            "pos_z": z_arr,
+            "rot_x": quats[:, 0],
+            "rot_y": quats[:, 1],
+            "rot_z": quats[:, 2],
+            "rot_w": quats[:, 3],
+        })
+
+        metrics = compute_tilt_metrics(df_gt, t_arm=10.0, t_land_cmd=42.0)
+        self.assertEqual(metrics["first_tilt_exceed_45_s"], "", "Single-sample spike must NOT count")
+        self.assertEqual(metrics["first_tilt_z_m"], "")
+        self.assertEqual(metrics["first_tilt_any_s"], round(float(t_arr[spike_idx]), 3))
+        self.assertEqual(metrics["max_tilt_inflight_deg"], 60.0)
+
+    def test_tilt_sustained_excursion_counts(self):
+        """(b) Sustained excursion (>=0.1s) before the landing command counts."""
+        compute_tilt_metrics = batch_module.compute_tilt_metrics
+        t_arr = np.arange(10.0, 50.0, 0.02)
+        tilts = np.zeros(len(t_arr))
+        z_arr = np.full(len(t_arr), 2.5)
+
+        # Sustained excursion of 8 samples (0.14s >= 0.1s) starting at t = 25.0s
+        start_idx = np.argmin(np.abs(t_arr - 25.0))
+        for k in range(start_idx, start_idx + 8):
+            tilts[k] = 60.0
+        z_arr[start_idx] = 1.85
+
+        quats = R_scipy.from_euler("x", tilts[:, None], degrees=True).as_quat()
+        df_gt = pd.DataFrame({
+            "sample_idx": np.arange(len(t_arr)),
+            "timestamp_total_sec": t_arr,
+            "pos_x": 0.0,
+            "pos_y": 0.0,
+            "pos_z": z_arr,
+            "rot_x": quats[:, 0],
+            "rot_y": quats[:, 1],
+            "rot_z": quats[:, 2],
+            "rot_w": quats[:, 3],
+        })
+
+        metrics = compute_tilt_metrics(df_gt, t_arm=10.0, t_land_cmd=42.0)
+        self.assertEqual(metrics["first_tilt_exceed_45_s"], round(float(t_arr[start_idx]), 3))
+        self.assertEqual(metrics["first_tilt_z_m"], 1.85)
+        self.assertEqual(metrics["first_tilt_any_s"], round(float(t_arr[start_idx]), 3))
+        self.assertEqual(metrics["max_tilt_inflight_deg"], 60.0)
+
+    def test_tilt_touchdown_flip_after_landing_command_not_counted(self):
+        """(c) Touchdown flip after the landing command must NOT count."""
+        compute_tilt_metrics = batch_module.compute_tilt_metrics
+        t_arr = np.arange(10.0, 50.0, 0.02)
+        tilts = np.full(len(t_arr), 5.0)  # Nominal 5 deg in-flight tilt
+        z_arr = np.full(len(t_arr), 2.5)
+
+        # Touchdown flip after landing command (landing command at 42.0s, flip at 45.0s)
+        td_start_idx = np.argmin(np.abs(t_arr - 45.0))
+        for k in range(td_start_idx, td_start_idx + 50):
+            tilts[k] = 75.0
+            z_arr[k] = 0.1
+
+        quats = R_scipy.from_euler("x", tilts[:, None], degrees=True).as_quat()
+        df_gt = pd.DataFrame({
+            "sample_idx": np.arange(len(t_arr)),
+            "timestamp_total_sec": t_arr,
+            "pos_x": 0.0,
+            "pos_y": 0.0,
+            "pos_z": z_arr,
+            "rot_x": quats[:, 0],
+            "rot_y": quats[:, 1],
+            "rot_z": quats[:, 2],
+            "rot_w": quats[:, 3],
+        })
+
+        metrics = compute_tilt_metrics(df_gt, t_arm=10.0, t_land_cmd=42.0)
+        self.assertEqual(metrics["first_tilt_exceed_45_s"], "", "Post-landing touchdown flip must NOT count")
+        self.assertEqual(metrics["first_tilt_z_m"], "")
+        self.assertEqual(metrics["first_tilt_any_s"], round(float(t_arr[td_start_idx]), 3))
+        self.assertEqual(metrics["max_tilt_inflight_deg"], 5.0, "In-flight max tilt must reflect pre-landing window")
 
 
 if __name__ == "__main__":
