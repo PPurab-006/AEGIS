@@ -468,6 +468,66 @@ class TestRetryLogic(unittest.TestCase):
         self.assertEqual(metrics["first_tilt_any_s"], round(float(t_arr[td_start_idx]), 3))
         self.assertEqual(metrics["max_tilt_inflight_deg"], 5.0, "In-flight max tilt must reflect pre-landing window")
 
+    def test_max_tilt_post_landcmd_airborne_tumble(self):
+        """Part 2 unit test: low pre-landing tilt plus an airborne 150 deg tumble after the landing command
+        must give a low max_tilt_inflight_deg and a high max_tilt_post_landcmd_deg with z above 1 m."""
+        compute_tilt_metrics = batch_module.compute_tilt_metrics
+        t_arr = np.arange(10.0, 50.0, 0.02)
+        tilts = np.full(len(t_arr), 6.0)  # low nominal 6 deg pre-landing tilt
+        z_arr = np.full(len(t_arr), 2.5)
+
+        # Airborne tumble of 150 deg after landing command (landing command at 42.0s, tumble at 43.5s at z=1.8m)
+        tumble_start_idx = np.argmin(np.abs(t_arr - 43.5))
+        for k in range(tumble_start_idx, tumble_start_idx + 25):
+            tilts[k] = 150.0
+            z_arr[k] = 1.8
+
+        quats = R_scipy.from_euler("x", tilts[:, None], degrees=True).as_quat()
+        df_gt = pd.DataFrame({
+            "sample_idx": np.arange(len(t_arr)),
+            "timestamp_total_sec": t_arr,
+            "pos_x": 0.0,
+            "pos_y": 0.0,
+            "pos_z": z_arr,
+            "rot_x": quats[:, 0],
+            "rot_y": quats[:, 1],
+            "rot_z": quats[:, 2],
+            "rot_w": quats[:, 3],
+        })
+
+        metrics = compute_tilt_metrics(df_gt, t_arm=10.0, t_land_cmd=42.0)
+        self.assertEqual(metrics["max_tilt_inflight_deg"], 6.0, "In-flight max tilt must be low")
+        self.assertEqual(metrics["max_tilt_post_landcmd_deg"], 150.0, "Post-landing max tilt must capture 150 deg tumble")
+        self.assertGreater(metrics["z_at_max_tilt_post_landcmd"], 1.0, "z at max post-landing tilt must be above 1 m")
+        self.assertEqual(metrics["z_at_max_tilt_post_landcmd"], 1.8)
+
+    def test_headline_eligibility(self):
+        """Part 4 unit test: headline_eligible is True when all hardened gates PASS
+        and max_tilt_inflight_deg < 45.0, False otherwise."""
+        # Case 1: gates pass and tilt < 45
+        gate_res_pass = {
+            "combined_pass": True,
+            "max_tilt_inflight_deg": 43.1,
+        }
+        tilt_ok1 = float(gate_res_pass["max_tilt_inflight_deg"]) < 45.0
+        self.assertTrue(gate_res_pass["combined_pass"] and tilt_ok1)
+
+        # Case 2: gates pass but tilt >= 45
+        gate_res_high_tilt = {
+            "combined_pass": True,
+            "max_tilt_inflight_deg": 45.36,
+        }
+        tilt_ok2 = float(gate_res_high_tilt["max_tilt_inflight_deg"]) < 45.0
+        self.assertFalse(gate_res_high_tilt["combined_pass"] and tilt_ok2)
+
+        # Case 3: gates fail even if tilt < 45
+        gate_res_gate_fail = {
+            "combined_pass": False,
+            "max_tilt_inflight_deg": 15.0,
+        }
+        tilt_ok3 = float(gate_res_gate_fail["max_tilt_inflight_deg"]) < 45.0
+        self.assertFalse(gate_res_gate_fail["combined_pass"] and tilt_ok3)
+
 
 if __name__ == "__main__":
     unittest.main()

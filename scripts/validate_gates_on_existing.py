@@ -143,6 +143,9 @@ def evaluate_flight(flight_dir: Path, attempt_num: int) -> dict:
         "first_tilt_z_m": "-",
         "max_tilt_inflight_deg": "-",
         "landing_command_s": "-",
+        "max_tilt_post_landcmd_deg": "-",
+        "z_at_max_tilt_post_landcmd": "-",
+        "headline_eligible": False,
         "old_max_tilt_z2": "-",
         "first_tilt_any_s": "-",
         "first_envelope_viol": "-",
@@ -344,12 +347,14 @@ def evaluate_flight(flight_dir: Path, attempt_num: int) -> dict:
     # Evaluate tilt metrics whenever GT is available
     if df_gt is not None:
         if compute_tilt_metrics is not None:
-            tm = compute_tilt_metrics(df_gt, t_arm=t_arm, t_land_cmd=t_land_cmd)
+            tm = compute_tilt_metrics(df_gt, t_arm=t_arm, t_land_cmd=t_land_cmd, t_disarm=t_disarm)
             result["first_tilt_exceed_45_s"] = str(tm["first_tilt_exceed_45_s"]) if tm["first_tilt_exceed_45_s"] != "" else "-"
             result["first_tilt_z_m"] = str(tm["first_tilt_z_m"]) if tm["first_tilt_z_m"] != "" else "-"
             result["max_tilt_inflight_deg"] = str(tm["max_tilt_inflight_deg"]) if tm["max_tilt_inflight_deg"] != "" else "-"
             result["landing_command_s"] = str(tm["landing_command_s"]) if tm["landing_command_s"] != "" else "-"
             result["first_tilt_any_s"] = str(tm["first_tilt_any_s"]) if tm["first_tilt_any_s"] != "" else "-"
+            result["max_tilt_post_landcmd_deg"] = str(tm.get("max_tilt_post_landcmd_deg", "")) if tm.get("max_tilt_post_landcmd_deg", "") != "" else "-"
+            result["z_at_max_tilt_post_landcmd"] = str(tm.get("z_at_max_tilt_post_landcmd", "")) if tm.get("z_at_max_tilt_post_landcmd", "") != "" else "-"
 
         # Old z >= 2.0 max tilt
         z_vals = df_gt["pos_z"].values.astype(float)
@@ -363,6 +368,22 @@ def evaluate_flight(flight_dir: Path, attempt_num: int) -> dict:
             result["old_max_tilt_z2"] = f"{np.max(tilt_deg[act_mask]):.2f}"
         else:
             result["old_max_tilt_z2"] = "-"
+
+    # Headline eligibility (D1)
+    hardened_pass = (
+        result["duration_gate"].startswith("PASS") and
+        result["envelope_gate"] == "PASS" and
+        result["failsafe_gate"].startswith("PASS") and
+        result["warn_gate"] == "PASS"
+    )
+    max_tilt_str = result["max_tilt_inflight_deg"]
+    tilt_ok = False
+    if max_tilt_str != "-":
+        try:
+            tilt_ok = float(max_tilt_str) < 45.0
+        except (ValueError, TypeError):
+            tilt_ok = False
+    result["headline_eligible"] = hardened_pass and tilt_ok
 
     result["pre_arm_notes"] = "; ".join(pre_notes)
     return result
@@ -398,11 +419,13 @@ def main():
     # Format Markdown Table
     headers = [
         "flight", "att", "first_tilt_exceed_45_s", "z_cross", "max_tilt_inflight",
-        "land_cmd_s", "old_tilt_z2", "first_any_s", "dur_gate", "env_gate", "failsafe", "warn_gate"
+        "land_cmd_s", "max_tilt_post", "z_max_post", "old_tilt_z2", "first_any_s",
+        "dur_gate", "env_gate", "failsafe", "warn_gate", "headline_eligible"
     ]
     keys = [
         "flight", "attempt", "first_tilt_exceed_45_s", "first_tilt_z_m", "max_tilt_inflight_deg",
-        "landing_command_s", "old_max_tilt_z2", "first_tilt_any_s", "duration_gate", "envelope_gate", "failsafe_gate", "warn_gate"
+        "landing_command_s", "max_tilt_post_landcmd_deg", "z_at_max_tilt_post_landcmd", "old_max_tilt_z2", "first_tilt_any_s",
+        "duration_gate", "envelope_gate", "failsafe_gate", "warn_gate", "headline_eligible"
     ]
     col_widths = [max(len(h), max((len(str(r[k])) for r in results), default=0)) for h, k in zip(headers, keys)]
 
@@ -419,12 +442,15 @@ def main():
             str(r["first_tilt_z_m"]).center(col_widths[3]),
             str(r["max_tilt_inflight_deg"]).center(col_widths[4]),
             str(r["landing_command_s"]).center(col_widths[5]),
-            str(r["old_max_tilt_z2"]).center(col_widths[6]),
-            str(r["first_tilt_any_s"]).center(col_widths[7]),
-            str(r["duration_gate"]).ljust(col_widths[8]),
-            str(r["envelope_gate"]).ljust(col_widths[9]),
-            str(r["failsafe_gate"]).ljust(col_widths[10]),
-            str(r["warn_gate"]).ljust(col_widths[11]),
+            str(r["max_tilt_post_landcmd_deg"]).center(col_widths[6]),
+            str(r["z_at_max_tilt_post_landcmd"]).center(col_widths[7]),
+            str(r["old_max_tilt_z2"]).center(col_widths[8]),
+            str(r["first_tilt_any_s"]).center(col_widths[9]),
+            str(r["duration_gate"]).ljust(col_widths[10]),
+            str(r["envelope_gate"]).ljust(col_widths[11]),
+            str(r["failsafe_gate"]).ljust(col_widths[12]),
+            str(r["warn_gate"]).ljust(col_widths[13]),
+            str(r["headline_eligible"]).center(col_widths[14]),
         ]
         print(" | ".join(vals))
 
@@ -434,6 +460,7 @@ def main():
     n_env_pass = sum(1 for r in results if r["envelope_gate"] == "PASS")
     n_fs_pass  = sum(1 for r in results if r["failsafe_gate"].startswith("PASS"))
     n_warn_pass = sum(1 for r in results if r["warn_gate"] == "PASS")
+    n_eligible = sum(1 for r in results if r["headline_eligible"])
 
     print("\nSummary:")
     print(f"  Total flights evaluated: {n_total}")
@@ -441,6 +468,26 @@ def main():
     print(f"  Envelope Gate PASS: {n_env_pass}/{n_total}")
     print(f"  PX4 Failsafe PASS:  {n_fs_pass}/{n_total}")
     print(f"  Health Warning Gate PASS: {n_warn_pass}/{n_total}")
+    print(f"  Headline Eligible: {n_eligible}/{n_total}")
+
+    ineligible = [r for r in results if not r["headline_eligible"]]
+    print(f"\nHeadline Ineligible Flights ({len(ineligible)}):")
+    for r in ineligible:
+        reasons = []
+        if not r["duration_gate"].startswith("PASS"):
+            reasons.append(f"duration: {r['duration_gate']}")
+        if r["envelope_gate"] != "PASS":
+            reasons.append(f"envelope: {r['envelope_gate']}")
+        if not r["failsafe_gate"].startswith("PASS"):
+            reasons.append(f"failsafe: {r['failsafe_gate']}")
+        if r["warn_gate"] != "PASS":
+            reasons.append(f"health_warn: {r['warn_gate']}")
+        try:
+            if float(r["max_tilt_inflight_deg"]) >= 45.0:
+                reasons.append(f"max_tilt_inflight: {r['max_tilt_inflight_deg']} >= 45.0")
+        except Exception:
+            pass
+        print(f"  - {r['flight']}: {'; '.join(reasons)}")
 
     # Flagging sustained in-flight crossing
     expected_sustained = {"sweep_G_B_R1", "sweep_G_H_R1", "sweep_G_H_R3", "sweep_M_H_R2", "sweep_M_H_R3"}

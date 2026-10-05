@@ -221,6 +221,7 @@ def compute_tilt_metrics(
     df_gt: pd.DataFrame | None,
     t_arm: float | None = None,
     t_land_cmd: float | None = None,
+    t_disarm: float | None = None,
 ) -> dict:
     """Compute tilt metrics over ground-truth flight telemetry.
 
@@ -234,6 +235,8 @@ def compute_tilt_metrics(
     t_land_cmd : float | None
         Landing command timestamp (earliest of 'Landing at current position',
         failsafe land, or disarm). If None, end of dataset is used.
+    t_disarm : float | None
+        Disarming timestamp in seconds, or None if end of log.
 
     Returns
     -------
@@ -247,6 +250,9 @@ def compute_tilt_metrics(
         - 'max_tilt_inflight_deg': maximum tilt angle in degrees over the
           [t_arm, t_land_cmd] window. Empty string if none.
         - 'landing_command_s': rounded landing command timestamp, or empty string.
+        - 'max_tilt_post_landcmd_deg': maximum tilt angle in degrees from landing
+          command to disarm/end of log, all samples. Empty string if none.
+        - 'z_at_max_tilt_post_landcmd': pos_z at max_tilt_post_landcmd_deg. Empty string if none.
     """
     res = {
         "first_tilt_exceed_45_s": "",
@@ -254,6 +260,8 @@ def compute_tilt_metrics(
         "first_tilt_any_s": "",
         "max_tilt_inflight_deg": "",
         "landing_command_s": round(float(t_land_cmd), 3) if t_land_cmd is not None else "",
+        "max_tilt_post_landcmd_deg": "",
+        "z_at_max_tilt_post_landcmd": "",
     }
     if df_gt is None or len(df_gt) == 0:
         return res
@@ -286,6 +294,19 @@ def compute_tilt_metrics(
 
         if len(tilt_win) > 0:
             res["max_tilt_inflight_deg"] = round(float(np.max(tilt_win)), 2)
+
+        # Post-landing window: from landing command to disarm/end of log, all samples
+        if t_land_cmd is not None:
+            post_mask = (t_gt >= t_land_cmd)
+            if t_disarm is not None:
+                post_mask &= (t_gt <= t_disarm)
+            t_post = t_gt[post_mask]
+            z_post = z_gt[post_mask]
+            tilt_post = tilt_deg[post_mask]
+            if len(tilt_post) > 0:
+                idx_max_post = int(np.argmax(tilt_post))
+                res["max_tilt_post_landcmd_deg"] = round(float(tilt_post[idx_max_post]), 2)
+                res["z_at_max_tilt_post_landcmd"] = round(float(z_post[idx_max_post]), 3)
 
         # First sustained tilt > 45 deg for >= 0.1 s of GT time
         idx_45_win = np.where(tilt_win > 45.0)[0]
@@ -332,6 +353,9 @@ def check_flight_gates(flight_dir: Path, motion_retcode: int = 0, motion_timed_o
         "first_tilt_z_m": "",
         "first_tilt_any_s": "",
         "max_tilt_inflight_deg": "",
+        "max_tilt_post_landcmd_deg": "",
+        "z_at_max_tilt_post_landcmd": "",
+        "headline_eligible": False,
         "pre_arm_notes": "",
         "combined_pass": True,
         "fail_reasons": [],
@@ -584,13 +608,24 @@ def check_flight_gates(flight_dir: Path, motion_retcode: int = 0, motion_timed_o
 
     # Evaluate tilt metrics whenever ground truth data is available
     if df_gt is not None:
-        tilt_metrics = compute_tilt_metrics(df_gt, t_arm=t_arm, t_land_cmd=t_land_cmd)
+        tilt_metrics = compute_tilt_metrics(df_gt, t_arm=t_arm, t_land_cmd=t_land_cmd, t_disarm=t_disarm)
         res["first_tilt_exceed_45_s"] = tilt_metrics["first_tilt_exceed_45_s"]
         res["first_tilt_z_m"] = tilt_metrics["first_tilt_z_m"]
         res["first_tilt_any_s"] = tilt_metrics["first_tilt_any_s"]
         res["max_tilt_inflight_deg"] = tilt_metrics["max_tilt_inflight_deg"]
+        res["max_tilt_post_landcmd_deg"] = tilt_metrics["max_tilt_post_landcmd_deg"]
+        res["z_at_max_tilt_post_landcmd"] = tilt_metrics["z_at_max_tilt_post_landcmd"]
         if tilt_metrics["landing_command_s"] != "":
             res["landing_command_s"] = tilt_metrics["landing_command_s"]
+
+    # Headline eligibility (D1)
+    tilt_ok = False
+    if res.get("max_tilt_inflight_deg") != "":
+        try:
+            tilt_ok = float(res["max_tilt_inflight_deg"]) < 45.0
+        except (ValueError, TypeError):
+            tilt_ok = False
+    res["headline_eligible"] = res["combined_pass"] and tilt_ok
 
     return res
 
@@ -969,6 +1004,9 @@ def run_flight(
                 "first_tilt_z_m": gate_res.get("first_tilt_z_m", ""),
                 "first_tilt_any_s": gate_res.get("first_tilt_any_s", ""),
                 "max_tilt_inflight_deg": gate_res.get("max_tilt_inflight_deg", ""),
+                "max_tilt_post_landcmd_deg": gate_res.get("max_tilt_post_landcmd_deg", ""),
+                "z_at_max_tilt_post_landcmd": gate_res.get("z_at_max_tilt_post_landcmd", ""),
+                "headline_eligible": gate_res.get("headline_eligible", False),
                 "pre_arm_notes": gate_res.get("pre_arm_notes", ""),
                 **stats,
             }
@@ -1023,6 +1061,9 @@ def run_flight(
                 "first_tilt_z_m": gate_res.get("first_tilt_z_m", ""),
                 "first_tilt_any_s": gate_res.get("first_tilt_any_s", ""),
                 "max_tilt_inflight_deg": gate_res.get("max_tilt_inflight_deg", ""),
+                "max_tilt_post_landcmd_deg": gate_res.get("max_tilt_post_landcmd_deg", ""),
+                "z_at_max_tilt_post_landcmd": gate_res.get("z_at_max_tilt_post_landcmd", ""),
+                "headline_eligible": gate_res.get("headline_eligible", False),
                 "pre_arm_notes": gate_res.get("pre_arm_notes", ""),
                 **stats,
             }
@@ -1086,6 +1127,9 @@ def run_flight(
         "first_tilt_z_m": last_gate_res.get("first_tilt_z_m", ""),
         "first_tilt_any_s": last_gate_res.get("first_tilt_any_s", ""),
         "max_tilt_inflight_deg": last_gate_res.get("max_tilt_inflight_deg", ""),
+        "max_tilt_post_landcmd_deg": last_gate_res.get("max_tilt_post_landcmd_deg", ""),
+        "z_at_max_tilt_post_landcmd": last_gate_res.get("z_at_max_tilt_post_landcmd", ""),
+        "headline_eligible": last_gate_res.get("headline_eligible", False),
         "pre_arm_notes": last_gate_res.get("pre_arm_notes", ""),
         **stats,
     }
@@ -1356,6 +1400,9 @@ def main():
                 "first_tilt_z_m": "",
                 "first_tilt_any_s": "",
                 "max_tilt_inflight_deg": "",
+                "max_tilt_post_landcmd_deg": "",
+                "z_at_max_tilt_post_landcmd": "",
+                "headline_eligible": False,
                 "active_duration_s": 0.0,
                 "active_frames": 0,
                 "naive_failure_frames": 0,
