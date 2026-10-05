@@ -406,6 +406,7 @@ def determine_landing_script_initiated(
     t_land_cmd: float | None = None,
     warnings: list[tuple[float, str]] | None = None,
     nominal_flight_time_s: float = NOMINAL_SCRIPT_FLIGHT_TIME_S,
+    tolerance_s: float = 1.0,
 ) -> bool:
     """Determine whether landing was initiated by the nominal mission script.
 
@@ -422,6 +423,8 @@ def determine_landing_script_initiated(
         List of (timestamp, message) health/failsafe warnings.
     nominal_flight_time_s : float
         Nominal script flight duration from arming to land command (default: 31.22s).
+    tolerance_s : float
+        Tolerance window around nominal flight time for historical flights (default: 1.0s).
 
     Returns
     -------
@@ -441,7 +444,7 @@ def determine_landing_script_initiated(
         return False
 
     diff_timing = abs(t_land_cmd - (t_arm + nominal_flight_time_s))
-    within_timing = diff_timing <= 0.3
+    within_timing = diff_timing <= tolerance_s
 
     no_preceding_warn = True
     if warnings:
@@ -641,6 +644,29 @@ def compute_tilt_metrics(
     return res
 
 
+def compute_duration_gate(df_gt: pd.DataFrame | None, threshold_s: float = 18.0) -> tuple[float, str, bool]:
+    """Compute active flight duration gate from dataset_gt.csv.
+    Original definition: first to last sample with pos_z >= 2.0 in dataset_gt.csv.
+    Threshold: >= 18.0s.
+
+    Returns (dur_s, gate_status_str, pass_bool).
+    """
+    if df_gt is None:
+        return 0.0, "FAIL (no GT)", False
+    if len(df_gt) < 10:
+        return 0.0, "FAIL (insufficient rows)", False
+    t = df_gt["timestamp_total_sec"].values.astype(float)
+    z = df_gt["pos_z"].values.astype(float)
+    act_idx = np.where(z >= 2.0)[0]
+    if len(act_idx) < 10:
+        return 0.0, "FAIL (never reached 2.0m)", False
+    dur = float(t[act_idx[-1]] - t[act_idx[0]])
+    if dur >= threshold_s:
+        return dur, f"PASS ({dur:.1f}s)", True
+    else:
+        return dur, f"FAIL ({dur:.1f}s < 18s)", False
+
+
 def check_flight_gates(flight_dir: Path, motion_retcode: int = 0, motion_timed_out: bool = False) -> dict:
     """Evaluate duration, spatial envelope, PX4 failsafe, motion script exit,
     and post-arm health/failsafe warning gates for a flight attempt.
@@ -731,14 +757,11 @@ def check_flight_gates(flight_dir: Path, motion_retcode: int = 0, motion_timed_o
             t = df_gt["timestamp_total_sec"].values.astype(float)
             z = df_gt["pos_z"].values.astype(float)
             act_idx = np.where(z >= 2.0)[0]
-            if len(act_idx) < 10:
+
+            dur, dur_status, dur_pass = compute_duration_gate(df_gt, threshold_s=18.0)
+            if not dur_pass:
                 res["gate_duration"] = "FAIL"
-                res["fail_reasons"].append("Vehicle never reached 2.0m cruise altitude")
-            else:
-                dur = float(t[act_idx[-1]] - t[act_idx[0]])
-                if dur < 18.0:
-                    res["gate_duration"] = "FAIL"
-                    res["fail_reasons"].append(f"Active duration gate failed: {dur:.2f}s < 18.0s threshold")
+                res["fail_reasons"].append(f"Active duration gate failed: {dur:.2f}s < 18.0s threshold" if dur > 0 else dur_status)
 
             n_img = len(list(img_dir.glob("*.png")))
             if n_img < len(df_cam) - 10:

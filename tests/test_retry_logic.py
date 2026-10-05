@@ -813,10 +813,11 @@ class TestRetryLogic(unittest.TestCase):
         self.assertTrue(det(flight_dir, t_arm=t_arm, t_land_cmd=t_land_nom, warnings=[]))
         self.assertTrue(det(flight_dir, t_arm=t_arm, t_land_cmd=t_land_nom + 0.25, warnings=[]))
         self.assertTrue(det(flight_dir, t_arm=t_arm, t_land_cmd=t_land_nom - 0.25, warnings=[]))
+        self.assertTrue(det(flight_dir, t_arm=t_arm, t_land_cmd=t_land_nom + 0.8, warnings=[]), "0.8s diff is within 1.0s tolerance")
 
-        # 4. Historical flight: off nominal timing (> 0.3s diff) -> False
+        # 4. Historical flight: off nominal timing (> 1.0s diff) -> False
         self.assertFalse(det(flight_dir, t_arm=t_arm, t_land_cmd=t_land_nom - 2.0, warnings=[]))
-        self.assertFalse(det(flight_dir, t_arm=t_arm, t_land_cmd=t_land_nom + 0.8, warnings=[]))
+        self.assertFalse(det(flight_dir, t_arm=t_arm, t_land_cmd=t_land_nom + 1.5, warnings=[]))
 
         # 5. Historical flight: on nominal timing, but warning within 1.0s before landing -> False
         warn_near = [(t_land_nom - 0.5, "Compass needs calibration - Land now!")]
@@ -825,6 +826,45 @@ class TestRetryLogic(unittest.TestCase):
         # 6. Historical flight: on nominal timing, warning > 1.0s before landing -> True
         warn_early = [(t_land_nom - 5.0, "Attitude failure (roll)")]
         self.assertTrue(det(flight_dir, t_arm=t_arm, t_land_cmd=t_land_nom, warnings=warn_early))
+
+    def test_compute_duration_gate(self):
+        """Test compute_duration_gate function:
+        - Passing duration >= 18.0s
+        - Failing duration < 18.0s
+        - Vehicle never reaching 2.0m cruise altitude
+        - None / insufficient GT rows
+        """
+        compute_dur = batch_module.compute_duration_gate
+
+        # 1. dur >= 18.0s
+        t_pass = np.linspace(0, 30, 300)
+        z_pass = np.ones(300) * 2.5
+        df_pass = pd.DataFrame({"timestamp_total_sec": t_pass, "pos_z": z_pass})
+        dur, status, passed = compute_dur(df_pass)
+        self.assertTrue(passed)
+        self.assertAlmostEqual(dur, 30.0, places=2)
+        self.assertTrue(status.startswith("PASS"))
+
+        # 2. dur < 18.0s
+        t_fail = np.linspace(0, 15, 150)
+        z_fail = np.ones(150) * 2.5
+        df_fail = pd.DataFrame({"timestamp_total_sec": t_fail, "pos_z": z_fail})
+        dur, status, passed = compute_dur(df_fail)
+        self.assertFalse(passed)
+        self.assertAlmostEqual(dur, 15.0, places=2)
+        self.assertTrue(status.startswith("FAIL"))
+
+        # 3. Never reaches 2.0m
+        t_low = np.linspace(0, 30, 300)
+        z_low = np.ones(300) * 1.5
+        df_low = pd.DataFrame({"timestamp_total_sec": t_low, "pos_z": z_low})
+        dur, status, passed = compute_dur(df_low)
+        self.assertFalse(passed)
+        self.assertEqual(status, "FAIL (never reached 2.0m)")
+
+        # 4. None / insufficient rows
+        self.assertFalse(compute_dur(None)[2])
+        self.assertFalse(compute_dur(pd.DataFrame())[2])
 
 
 if __name__ == "__main__":

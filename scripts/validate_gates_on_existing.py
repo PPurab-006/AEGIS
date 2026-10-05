@@ -43,11 +43,13 @@ try:
     classify_warning_timing = batch_module.classify_warning_timing
     compute_loss_of_control = batch_module.compute_loss_of_control
     determine_landing_script_initiated = batch_module.determine_landing_script_initiated
+    compute_duration_gate = batch_module.compute_duration_gate
 except Exception:
     compute_tilt_metrics = None
     classify_warning_timing = None
     compute_loss_of_control = None
     determine_landing_script_initiated = None
+    compute_duration_gate = None
 
 PX4_DIR = os.environ.get("PX4_DIR", str(Path.home() / "PX4-Autopilot"))
 
@@ -187,14 +189,18 @@ def evaluate_flight(flight_dir: Path, attempt_num: int) -> dict:
         act_idx = np.where(z >= 2.0)[0]
 
         # Duration gate
-        if len(act_idx) < 10:
-            result["duration_gate"] = "FAIL (never reached 2.0m)"
+        if compute_duration_gate is not None:
+            dur, dur_status, dur_pass = compute_duration_gate(df_gt, threshold_s=18.0)
+            result["duration_gate"] = dur_status
         else:
-            dur = float(t[act_idx[-1]] - t[act_idx[0]])
-            if dur >= 18.0:
-                result["duration_gate"] = f"PASS ({dur:.1f}s)"
+            if len(act_idx) < 10:
+                result["duration_gate"] = "FAIL (never reached 2.0m)"
             else:
-                result["duration_gate"] = f"FAIL ({dur:.1f}s < 18s)"
+                dur = float(t[act_idx[-1]] - t[act_idx[0]])
+                if dur >= 18.0:
+                    result["duration_gate"] = f"PASS ({dur:.1f}s)"
+                else:
+                    result["duration_gate"] = f"FAIL ({dur:.1f}s < 18s)"
 
         # Envelope gate 3(a)
         if len(act_idx) >= 1:
