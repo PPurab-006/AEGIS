@@ -4,7 +4,18 @@
 # (this repo's git history should never be the source of truth for the
 # raw telemetry — VO_Research is).
 data/raw/
-data/processed/
+
+# Ignore large intermediate frame-level feature and labeled tables (>2MB each)
+data/processed/*.csv
+!data/processed/expanded_flight_manifest.csv
+!data/processed/expanded_flight_split.csv
+!data/processed/flight_manifest.csv
+!data/processed/flight_split.csv
+!data/processed/live_ros2_predictions.csv
+!data/processed/sweep_flight_log.csv
+
+# Scratch and temporary scripts
+scratch/
 
 __pycache__/
 *.pyc

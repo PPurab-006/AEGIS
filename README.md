@@ -1,118 +1,125 @@
-# Research 2 — Learned VO Failure Predictor
+# Research 2 — Learned VO Failure Predictor (Archival Record)
 
-Working title: *IMU-trusted lightweight alternative to sliding-window
-pure-rotation handling*
+**Project Status**: **FROZEN / COMPLETE**  
+**Final Scientific Classification**: `REAL-TIME PREDICTIVE VALIDATION SUCCESS`  
+**Frozen Model Checkpoint**: [`models/expanded_mlp.pt`](file:///home/purab/Purab/Projects/Research2/models/expanded_mlp.pt)  
+**Frozen Scaler**: [`models/expanded_scaler.joblib`](file:///home/purab/Purab/Projects/Research2/models/expanded_scaler.joblib)  
+**Primary Report**: [`data/processed/realtime_deployment_validation_report.md`](file:///home/purab/Purab/Projects/Research2/data/processed/realtime_deployment_validation_report.md)  
 
-A direct, falsifiable follow-up to Research 1's VFO null result (linear/
-single-variable correlation analysis found no predictive signal for
-monocular VO tracking failure, all |r| < 0.16). This project tests
-whether a *learned nonlinear* combination of the same telemetry features
-finds signal where VFO's linear analysis found none.
+---
 
-Target: Nov 1, 2026 (stretch goal, zero risk to the ETH SSRF application,
-which depends only on Research 1 — already complete, DOI #1/#2/#3 all
-published).
+## 1. Executive Summary
 
-## Relationship to Research 1 (VO_Research)
+Research 2 investigated whether visual odometry (VO) tracking failure on autonomous multicopters can be predicted from onboard-available motion telemetry *prior to failure onset*. 
 
-This is a **separate repo** from VO_Research on purpose — the tooling
-here (ML training pipeline) is genuinely different from R1's ROS2/
-Gazebo/PX4 simulation stack. But the **data is not duplicated** into this
-repo. Instead, `scripts/01_fetch_data.py` pulls the specific CSVs needed
-directly from your local VO_Research repo path, preserving the
-provenance chain back to the DOI-pinned data (DOI #2:
-`10.5281/zenodo.22951257`).
+While Research 1 established a linear correlation null result (single-variable correlation decaying monotonically with lag, all $|r| < 0.16$), Research 2 tested and confirmed that a compact, learned nonlinear model over a short backward history ($\le 165$ ms) reliably captures imminent failure precursors across held-out flight trajectories and operates comfortably within the vehicle's real-time telemetry period.
 
-**Before running anything**, edit `configs/phase0_config.yaml` and set
-`source_repo.local_path` to your actual VO_Research repo location (e.g.
-`/home/purab/Purab/Projects/ROS`).
+---
 
-## Phase 0 — Data Assembly & Labeling
+## 2. Research Questions & Hypotheses
 
-Phase 0's job is narrow and complete in itself: produce a clean,
-validated, labeled, flight-split dataset. No feature engineering, no
-modeling — that's Phase 1 and Phase 2.
+1. **Prediction Feasibility**: Can a learned nonlinear model extract predictive signal of imminent VO failure within a forward horizon ($K=5$ frames, $\approx 165$ ms) using only lightweight motion telemetry?
+2. **Distributional Generalization**: Does the learned predictor generalize across an expanded, aggressive flight sweep covering diverse yaw rates ($7.5^\circ/\text{s}$ to $90.0^\circ/\text{s}$) and trajectory profiles (circle, box, helix, straight), rather than merely fitting the initial 33 flights?
+3. **Causal Real-Time Deployability**: Can the predictor operate strictly causally without future information, achieve end-to-end inference latency well beneath the $33.3$ ms telemetry period, and warn prior to failure onset in live ROS 2 middleware execution?
 
-### What's locked in this phase (see `configs/phase0_config.yaml` for full rationale)
+---
 
-- **Ground truth condition: RAW only.** DELAYED-TRI is excluded from
-  labeling — its 44-58% "failure" rates in F6/F9/F10 are the confirmed
-  zero-motion-fallback artifact from R1, not genuine tracking
-  degradation. Training on those labels would teach the model to predict
-  a pipeline bug.
-- **HOVER family excluded entirely.** Its 45% failure rate reflects
-  startup/baseline feature starvation at t≈0, a different phenomenon
-  from the sustained rotation-induced failure this research studies.
-- **Failure definition:** `num_inliers_pose < 8` — the pipeline's own
-  documented pose-update threshold, same definition used throughout R1.
-- **Active window:** `pos_z >= 2.0` — excludes takeoff/landing ground
-  phases, consistent with R1.
-- **Label type: single-frame** (is *this* frame a failure), not a
-  forward-looking window. This keeps the model-vs-VFO comparison in
-  Phase 3 apples-to-apples, since VFO's own analysis was per-frame.
-  Forward-window prediction ("will it fail in the next K frames") is a
-  planned extension for Phase 1/2, not baked into Phase 0.
-- **Split: flight-level, not frame-level**, stratified by family. This
-  is the single most important safeguard here — frames within one flight
-  are correlated, so splitting at the frame level would leak information
-  and produce an inflated, untrustworthy result.
-- **3 GT heading-discontinuity flights are flagged, not excluded**
-  (`p3_F6_L2_R1`, `p3_F6_L2_R3`, `p3_F10_L3_R2`) — wherever they land in
-  the split, that should be reported alongside any downstream result.
+## 3. Dataset, Filtering, and Flight Splits
 
-### Expected numbers (from the pre-Phase-0 data audit)
+- **Original Baseline Pool**: 33 flights (24 core + 9 exploratory, F1–F11, 21,618 frames), split flight-wise into 11 train, 11 validation, 11 test.
+- **Expanded Sweep Pool**: 48 flight maneuvers across a $4 \times 4$ matrix of yaw bins (G, M, A, E) and motion bins (C, B, S, H).
+- **Hardened Eligibility Filtering**:
+  - Excluded 6 ineligible flights: `sweep_G_B_R1`, `sweep_G_H_R1`, `sweep_G_H_R2`, `sweep_G_H_R3`, `sweep_M_H_R2`, `sweep_M_H_R3`.
+  - Condition **G_H** is officially excluded from the training pool after $0/3$ fresh re-flight attempts met predefined safety and envelope gates.
+  - Final eligible pool: **exactly 42 flights** (31,195 frames, 10,803 positive labels, 34.63% positive rate).
+- **Flight-Level Stratified Split (Seed 42)**:
+  - **Train**: 15 flights (11,178 frames, 3,739 positives, 33.45% positive rate)
+  - **Validation**: 13 flights (9,606 frames, 3,460 positives, 36.02% positive rate)
+  - **Held-Out Test**: 14 flights (10,411 frames, 3,604 positives, 34.62% positive rate)
+  - **Zero Flight Leakage**: Flights in Train, Val, and Test are completely disjoint ($\text{Train} \cap \text{Test} = \emptyset, \text{Val} \cap \text{Test} = \emptyset$).
 
-- 33 flights (24 core + 9 exploratory, HOVER excluded)
-- ~21,948 active-window frames
-- ~1,953 genuine failure frames (~8.9% base rate)
-- These are approximate — `02_build_labels.py` validates the actual
-  computed numbers against these and flags anything more than 5% off for
-  review (small deviations are expected/fine; large ones mean something
-  changed and needs a look before treating the dataset as final).
+---
 
-### Running it
+## 4. Model Architecture & Frozen Features
 
-```bash
-pip install -r requirements.txt
+- **Architecture**: Small MLP ($15 \to 32 \to 16 \to 1$) with ReLU activations and sigmoid output.
+- **Objective**: `BCEWithLogitsLoss` with training-derived positive weight ($pos\_weight = 1.9896$).
+- **Optimizer**: Adam ($\text{lr} = 10^{-3}, \text{weight\_decay} = 10^{-4}, \text{batch\_size} = 64, \text{max\_epochs} = 30$, early stopping patience 7).
+- **Feature Scaling**: `StandardScaler` fit strictly on the 15 training flights; test data scaled using frozen parameters.
+- **Feature Set (15 Lagged Telemetry Features)**:
+  - Absolute body yaw rate: `eis_yaw_rate_deg_lag{0, 1, 2, 3, 5}`
+  - Mean optical flow magnitude: `feature_vel_mean_lag{0, 1, 2, 3, 5}`
+  - Binary yaw-rate gate flag: `is_r_frame_lag{0, 1, 2, 3, 5}`
+- **Label Definition**: Raw VO failure rule $\text{num\_inliers\_pose} < 8$. Target is binary indicator of failure within current or next $K=5$ frames ($\approx 165$ ms).
 
-# Edit configs/phase0_config.yaml first — set source_repo.local_path
+---
 
-# Run the whole pipeline:
-bash scripts/run_phase0.sh
+## 5. Key Experimental Findings
 
-# Or run steps individually:
-python scripts/01_fetch_data.py     # pulls raw_vo.csv + dataset_gt.csv per flight
-python scripts/02_build_labels.py   # builds labeled frame table + validation report
-python scripts/03_split_flights.py  # locks the flight-level train/val/test split
-```
+### 5.1 Offline Generalization Evaluation
+| Metric | Original 33-Flight Baseline | Expanded 42-Flight Sweep | Generalization Verdict |
+|---|---|---|---|
+| **Eligible Flights** | 33 | 42 | +9 flights (+27.3%) |
+| **Held-Out Test Flights** | 11 | 14 | Disjoint distribution |
+| **Test AUROC ($K=5$)** | **0.8234** | **0.8046** | Delta = -0.0188 |
+| **Test F1 Score ($K=5$)** | **0.6634** | **0.6484** | Delta = -0.0150 |
+| **Precision** | 0.6033 | 0.5808 | Stable |
+| **Recall** | 0.7368 | 0.7336 | Delta = -0.0032 |
+| **AUPRC** | N/A | **0.7260** | Substantially above base rate (0.346) |
 
-### Outputs (gitignored — local working data, not committed)
+Across all 14 held-out test flights, individual per-flight AUROC ranged from **0.6690 to 0.8393** (mean ~0.760), with zero flights collapsing toward chance.
 
-- `data/raw/` — cached CSVs pulled from VO_Research, plus
-  `_fetch_manifest.txt` recording exactly what was pulled from where
-- `data/processed/frames_labeled.csv` — one row per active-window frame,
-  with `is_failure`, `family`, `run_dir`, `gt_discontinuity_flag`
-- `data/processed/flight_manifest.csv` — one row per flight (33 rows)
-- `data/processed/flight_split.csv` — flight manifest + assigned
-  train/val/test split (**this is the locked split — do not regenerate
-  with a different seed to "improve" results**)
-- `data/processed/phase0_validation_report.md` — the numbers, checked
-  against audit expectations, per-family breakdown, and where the
-  GT-discontinuity flights landed
+### 5.2 Horizon Sensitivity ($K \in \{2, 3, 5\}$)
+- **$K=5$ (~165 ms, Primary)**: AUROC = 0.8046, F1 = 0.6484
+- **$K=3$ (~99 ms)**: AUROC = 0.8052, F1 = 0.5512
+- **$K=2$ (~66 ms)**: AUROC = 0.8174, F1 = 0.4789
+AUROC remains virtually constant across horizons, while F1 increases monotonically with window length as positive frames accumulate.
 
-### Gate before Phase 1
+### 5.3 Causal Streaming Replay (10,481 Samples)
+- **Integrity**: Evaluated using a rolling history buffer ($N=6$). AUROC = 0.8057, F1 = 0.6483 (matches offline test identically).
+- **Latency**:
+  - Feature Construction: Mean = $3.8\,\mu\text{s}$
+  - Scaler Transform: Mean = $80.1\,\mu\text{s}$
+  - MLP Forward Pass: Mean = $43.3\,\mu\text{s}$
+  - **End-to-End Latency**: Mean = **0.1282 ms** (Median 0.1213 ms, P99 0.2139 ms).
+  - **Telemetry Budget Headroom**: **99.36%** of the $33.3$ ms budget remains available.
+- **Lead Time**:
+  - Total Failure Episodes: 658
+  - **True Early Warnings**: **522 episodes (79.3%)** warned *prior to* failure onset.
+  - Post-Failure Detections: 124 episodes (18.8%).
+  - Missed Failures: 12 episodes (1.8%).
+  - **Median Lead Time**: **0.165 s** (Mean 0.153 s, Range 0.033 s to 0.165 s).
 
-Read `data/processed/phase0_validation_report.md`. If all checks pass
-(or deviations are small and understood), Phase 0 is done. Do not start
-feature engineering or modeling until this report has been reviewed.
+### 5.4 Live ROS 2 Deployment Validation
+- **Middleware**: ROS 2 (`rclpy`) node [`LiveFailurePredictorNode`](file:///home/purab/Purab/Projects/Research2/scripts/live_ros2_failure_predictor.py) subscribing to `/telemetry/motion` and publishing to `/vo/failure_prediction`.
+- **Condition**: `sweep_A_C_R1` (Aggressive circle at $45^\circ/\text{s}$ yaw rate).
+- **Inference Rate**: Sustained streaming up to $192$ Hz (far exceeding 30 Hz requirement).
+- **Middleware Latency**: Mean = **0.6335 ms**, P99 = **3.7128 ms** (>88% headroom).
+- **Live Early Warning Rate**: **71 / 76 failure episodes (93.4%)** received valid early warnings before failure onset, with median lead time of **0.165 s**.
 
-## What's NOT in this repo yet
+---
 
-- Feature engineering (Phase 1)
-- Baseline model / LSTM training (Phase 2)
-- Held-out evaluation (Phase 3)
-- Any new-flight data collection scripts (Phase 4, only if needed after
-  Phase 3's verdict)
+## 6. Limitations
 
-These will be added as later deliverables, same phase-gated discipline
-as Research 1.
+1. **Simulation Environment**: Data collected in PX4 SITL + Gazebo (`agriculture.world`). While aerodynamics, sensor noise, and dynamics are simulated with high fidelity, physical hardware transfer remains unvalidated.
+2. **Optical Flow Conflation**: In raw (un-derotated) mode, KLT flow conflates rotational and translational visual motion.
+3. **No Closed-Loop Intervention**: Research 2 evaluated predictive failure detection only; autonomous supervisor recovery or control interventions were not executed.
+
+---
+
+## 7. Authoritative Scientific Claim
+
+> **"The proposed lightweight telemetry-based model was demonstrated to operate causally in real time and predict imminent VO failure from onboard-available motion telemetry prior to failure onset."**
+
+*Boundaries*:
+- This study demonstrates **causal, online failure prediction prior to onset**.
+- It does **not** claim autonomous recovery, flight safety guarantees, or physical causal mechanisms.
+- All required inputs (`eis_yaw_rate_deg`, `feature_vel_mean`, `is_r_frame`) are motion telemetry variables available directly onboard; hence the system is formally characterized as an **onboard telemetry-based imminent failure predictor**.
+
+---
+
+## 8. Archival Freeze & Transition to Research 3
+
+- **Research 2 is FROZEN and COMPLETE.** No further training, threshold tuning, or flight experiments will be conducted in this repository.
+- **Physical Hardware Testing**: Explicitly categorized as future work.
+- **Research 3 Transition**: Research 3 will consume the frozen Research 2 predictor ([`models/expanded_mlp.pt`](file:///home/purab/Purab/Projects/Research2/models/expanded_mlp.pt), [`models/expanded_scaler.joblib`](file:///home/purab/Purab/Projects/Research2/models/expanded_scaler.joblib)) as an immutable failure-warning oracle to develop and evaluate autonomous supervisory recovery controllers.

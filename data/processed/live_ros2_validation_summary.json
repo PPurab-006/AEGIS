@@ -1,0 +1,26 @@
+{
+  "flight_condition": "sweep_A_C_R1",
+  "motion_cell": "A_C (Aggressive Circle, 45 deg/s)",
+  "ros2_node_executed": true,
+  "telemetry_topic": "/telemetry/motion",
+  "prediction_topic": "/vo/failure_prediction",
+  "latency_live": {
+    "mean_ms": 0.6334988063660477,
+    "median_ms": 0.457135,
+    "p95_ms": 1.0077930000000004,
+    "p99_ms": 3.7128155000000027,
+    "max_ms": 36.54339,
+    "total_messages": 759,
+    "predictions_generated": 754,
+    "effective_rate_hz": 191.96937760337954
+  },
+  "synchronization": {
+    "total_failure_episodes": 76,
+    "true_early_warnings": 71,
+    "post_failure_detections": 4,
+    "missed_failures": 1,
+    "early_warning_rate_pct": 93.42105263157895,
+    "mean_lead_time_s": 0.1403661971830988,
+    "median_lead_time_s": 0.16499999999999915
+  }
+}
