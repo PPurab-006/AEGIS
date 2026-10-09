@@ -1,0 +1,2 @@
+total_active_frames,total_failure_frames,total_low_flow_frames,intersection_low_flow_and_failure,P_failure_given_low_flow,P_low_flow_given_failure,flow_failure_median,flow_failure_mean,flow_failure_p75,flow_nonfailure_median,flow_nonfailure_mean,is_r_mismatches,is_r_identity_percentage
+31615,1978,1983,1925,0.9707513867876955,0.9732052578361982,0.0,0.2608602628918099,0.0,17.7847,19.891727577015217,0,100.0

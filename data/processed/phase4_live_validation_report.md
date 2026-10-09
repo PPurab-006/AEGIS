@@ -117,9 +117,9 @@ Inference latency was measured on every live frame (feature assembly + scaler tr
 
 ## 6. Artifact Index
 
-- **Live Predictions CSV**: [`data/processed/phase4_live_predictions_f12.csv`](file:///home/purab/Purab/Projects/Research2/data/processed/phase4_live_predictions_f12.csv)
-- **Validation Report**: [`data/processed/phase4_live_validation_report.md`](file:///home/purab/Purab/Projects/Research2/data/processed/phase4_live_validation_report.md)
-- **Part 1 Canonical Dataset**: [`results/datasets/p3x_F12_L2_R1/`](file:///home/purab/Purab/Projects/ROS/results/datasets/p3x_F12_L2_R1)
-- **Orchestration Script**: [`scripts/10_live_prediction_f12.py`](file:///home/purab/Purab/Projects/Research2/scripts/10_live_prediction_f12.py)
+- **Live Predictions CSV**: [`data/processed/phase4_live_predictions_f12.csv`](data/processed/phase4_live_predictions_f12.csv)
+- **Validation Report**: [`data/processed/phase4_live_validation_report.md`](data/processed/phase4_live_validation_report.md)
+- **Part 1 Canonical Dataset**: [`results/datasets/p3x_F12_L2_R1/`](<RAW_DATA_DIR>/p3x_F12_L2_R1)
+- **Orchestration Script**: [`scripts/10_live_prediction_f12.py`](scripts/10_live_prediction_f12.py)
 
 Phase 4 live online prediction milestone is complete.

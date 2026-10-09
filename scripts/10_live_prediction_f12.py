@@ -44,7 +44,7 @@ import torch
 import torch.nn as nn
 
 # Add ROS core modules to sys.path
-ROS_REPO = Path("/home/purab/Purab/Projects/ROS")
+ROS_REPO = Path(os.environ.get("AEGIS_ROS_DIR", Path(__file__).resolve().parents[2] / "ROS"))
 sys.path.insert(0, str(ROS_REPO / "src" / "core"))
 sys.path.insert(0, str(ROS_REPO / "src" / "pipelines"))
 from run_offline_vo import OfflineVOProcessor

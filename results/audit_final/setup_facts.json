@@ -1,0 +1,138 @@
+{
+  "_note": "Paths cited in evidence strings originate from the evaluation environment on the author's machine.",
+  "a_excluded_flights": {
+    "value": {
+      "sweep_G_B_R1": "Excluded by health warning and tilt gates (max_tilt_motion: 135.72 deg >= 45.0 deg threshold; ULog flagged loss of control at t=35.168s via yaw_rate indicator).",
+      "sweep_G_H_R1": "Excluded by duration gate (15.8s < 18.0s active threshold), spatial envelope gate (breach), and tilt gate (max_tilt_motion: 72.48 deg >= 45.0 deg; ULog flagged loss of control at t=24.781s via vertical_speed indicator).",
+      "sweep_G_H_R2": "Excluded by duration gate (Att1: 16.7s < 18.0s, Att2: 17.6s < 18.0s threshold) and spatial envelope gate (breach).",
+      "sweep_G_H_R3": "Excluded by duration gate (Att1: 17.6s < 18.0s, Att2: 12.6s < 18.0s threshold), health warning gate (FAIL), and tilt gate (max_tilt_motion: 107.55 deg >= 45.0 deg).",
+      "sweep_M_H_R2": "Excluded by health warning and tilt gates (max_tilt_motion: 45.36 deg >= 45.0 deg; ULog flagged loss of control at t=35.923s via yaw_rate indicator).",
+      "sweep_M_H_R3": "Excluded by spatial envelope gate, health warning gate, and tilt gate (max_tilt_motion: 68.64 deg >= 45.0 deg; ULog flagged loss of control at t=35.953s via yaw_rate indicator)."
+    },
+    "evidence": "scripts/validate_gates_on_existing.py:543-561, 589-611; scripts/11_run_sweep_batch.py:761-765, 782-798, 889-902, 957-975; data/processed/sweep_flight_log.csv:5, 11-13, 24-25"
+  },
+  "b_camera": {
+    "value": {
+      "mounting_position_m": [0.12, 0.03, 0.242],
+      "mounting_orientation_rpy_rad": [0.0, 0.0, 0.0],
+      "pitch_angle": "Paper claims 'oriented at 45° pitch' (downward/forward-facing), but SDF model specifies body-aligned pose 0 0 0 (forward-facing in base_link)",
+      "resolution": "Actual Gazebo sensor and recorded camera_frames.csv: 1280 x 960 px; Paper text describes: 640 x 480 px",
+      "frame_rate_fps": 30.0,
+      "field_of_view_rad": 1.74,
+      "field_of_view_deg": 99.69,
+      "image_topic": "/world/{world}/model/x500_mono_cam_0/link/camera_link/sensor/camera/image"
+    },
+    "evidence": "<PX4_DIR>/Tools/simulation/gz/models/x500_mono_cam/model.sdf:10-17; <PX4_DIR>/Tools/simulation/gz/models/mono_cam/model.sdf:53-65; scripts/11_run_sweep_batch.py:1249, 1261; README.md:66; scripts/build_full_preprint.py:216; data/processed/phase4_live_validation_report.md:26; <ROS_REPO>/results/datasets/sweep_A_C_R1/camera_frames.csv:1"
+  },
+  "c_versions": {
+    "value": {
+      "px4": "Paper states v1.14; Host repository <PX4_DIR> is v1.18.0-beta1-209-g8aba32c862",
+      "gazebo": "Paper states Gazebo Sim (Garden); Batch scripts and logs state Gazebo Harmonic; Host gz sim version is 10.5.0",
+      "ros2_distro": "Paper states ROS 2 Humble; Batch runner scripts source /opt/ros/lyrical/setup.bash (ROS_DISTRO=lyrical)",
+      "os": "Host OS is Ubuntu 26.04.1 LTS (Linux kernel 7.0.0-34-generic); Evaluation host cited in logs was an Intel Core i9 / RTX 4090 system",
+      "python": "Python 3.14.4 (in .venv and system); README notes Python 3.11/3.14",
+      "opencv": "4.10.0 (in .venv)",
+      "torch": "2.14.0+cu130 (in .venv)",
+      "scikit_learn": "1.9.1 (in .venv)"
+    },
+    "evidence": "scripts/build_full_preprint.py:214, 410; scripts/11_run_sweep_batch.py:141, 145, 1562; README.md:9; requirements.txt:1-14; command outputs: `git -C <PX4_DIR> describe --tags`, `gz sim --version`, `echo $ROS_DISTRO`, `lsb_release -a`, `python -c 'import torch, sklearn, cv2; ...'`"
+  },
+  "d_vehicle_model_and_world": {
+    "value": {
+      "vehicle_model": "x500_mono_cam (Holybro x500 quadrotor with mono_cam, PX4 SITL model gz_x500_mono_cam, entity name x500_mono_cam_0)",
+      "world_file": "agriculture.world"
+    },
+    "evidence": "scripts/11_run_sweep_batch.py:58, 1216, 1249, 1562; <PX4_DIR>/Tools/simulation/gz/models/x500_mono_cam/model.sdf:3; <ROS_REPO>/configs/gazebo_models_worlds_collection-master/worlds/agriculture.world:1; README.md:66"
+  },
+  "e_vo_parameters": {
+    "value": {
+      "goodFeaturesToTrack": {
+        "maxCorners": 2000,
+        "qualityLevel": 0.001,
+        "minDistance": 5
+      },
+      "calcOpticalFlowPyrLK": {
+        "winSize": [21, 21],
+        "maxLevel": 3,
+        "criteria": "cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01"
+      },
+      "findEssentialMat": {
+        "method": "cv2.RANSAC",
+        "prob": 0.999,
+        "threshold": 1.0
+      },
+      "failure_threshold": "num_inliers_pose < 8 (or num_matched < 8)",
+      "cache_clear_logic": "When num_matched < 8, self.prev_pts is set to None. On the subsequent frame, if self.prev_pts is None or len(self.prev_pts) < 100, goodFeaturesToTrack is invoked to re-detect features, skipping pose integration for that frame. When num_inliers_pose >= 8, self.prev_pts is updated with only pose inliers."
+    },
+    "evidence": "<ROS_REPO>/src/core/minimal_vo.py:258-271, 300-305, 327, 342, 348; results/audit_final/failure_mechanism_report.md:38-50; scripts/audit_final/01_dataset_and_failure_forensics.py:207-217"
+  },
+  "f_yaw_commands_and_motion_profiles": {
+    "value": {
+      "commanded_yaw_rates_deg_s": {
+        "Gentle (G)": 7.5,
+        "Moderate (M)": 20.0,
+        "Aggressive (A)": 45.0,
+        "Extreme (E)": 90.0
+      },
+      "caption_discrepancy": "Paper caption states Moderate is 22.5 deg/s, but flight execution script actually commands 20.0 deg/s.",
+      "motion_profile_definitions": {
+        "C (Cruise)": "Constant gentle forward pitch (pitch_cmd = 1.4 deg)",
+        "B (Braking)": "Moderate cruise pitch (1.8 deg) with 4 discrete braking pulses at [4-5.5s, 8.5-10s, 13-14.5s, 17.5-19s] pulsing to -2.0 deg for 0.4s then holding 0.0 deg",
+        "S (Sharp Stop)": "Moderate-high cruise pitch (2.2 deg) with 2 abrupt full stops at [5.5-8.5s, 13.5-16.5s] pulsing to -3.0 deg for 0.5s then holding 0.0 deg for 2.5s",
+        "H (High-speed burst)": "Fast cruise pitch (3.5 deg) with 2 high-speed forward bursts at [5.0-7.5s, 13.0-15.5s] pitching to 5.5 deg (~3.5 m/s)"
+      },
+      "geometry_naming_discrepancy": "Paper describes C, B, S, H as trajectory shapes 'Circle, Box, Straight line, Helix', but flight execution script defines them as pitch/velocity profiles 'Cruise, Braking, Sharp Stop, High-speed burst'.",
+      "yaw_continuous_ramp": "YES. Yaw target is strictly a continuous unidirectional ramp defined by `yaw_target_deg = yaw_rate_deg_s * elapsed`."
+    },
+    "evidence": "scripts/fly_sweep_motion.py:32-41, 173-215; data/processed/sweep_flight_log.csv:2, 14, 26, 38; results/figures/publication/captions.md:15; scripts/build_full_preprint.py:259"
+  },
+  "g_ros2_three_process_harness": {
+    "value": {
+      "publisher_node": {
+        "node_name": "audit_publisher_node",
+        "topic": "/telemetry/motion",
+        "message_type": "geometry_msgs/msg/Vector3Stamped",
+        "fields": "vector.x = eis_yaw_rate_deg, vector.y = feature_vel_mean, vector.z = is_r_frame"
+      },
+      "predictor_node": {
+        "node_name": "audit_predictor_node",
+        "subscription_topic": "/telemetry/motion",
+        "subscription_type": "geometry_msgs/msg/Vector3Stamped",
+        "publication_topic": "/vo/failure_prediction",
+        "publication_type": "geometry_msgs/msg/PointStamped",
+        "fields": "point.x = prob, point.y = pred_label, point.z = cb_compute_ms, frame_id = latency string"
+      },
+      "listener_node": {
+        "node_name": "audit_listener_node",
+        "subscription_topic": "/vo/failure_prediction",
+        "subscription_type": "geometry_msgs/msg/PointStamped"
+      },
+      "paper_prose_discrepancy": "Preprint text at line 411 states 'sensor_msgs/msg/Imu and custom telemetry messages', but implementation uses Vector3Stamped and PointStamped."
+    },
+    "evidence": "scripts/audit/live_ros2_v2.py:97-108, 128, 168-194; scripts/build_full_preprint.py:410-414; results/audit_final/live_ros2_verification.md:8-10; scripts/audit_final/06_causal_replay_and_ros2_forensics.py:268-270"
+  },
+  "h_ros2_host_specifications": {
+    "value": {
+      "logged_evaluation_host": "Intel Core i9 / RTX 4090, ROS 2 Humble",
+      "cpu_model": "NOT FOUND in repo/logs beyond 'Intel Core i9'",
+      "core_count": "NOT FOUND in repo/logs",
+      "ram": "NOT FOUND in repo/logs",
+      "os": "NOT FOUND in repo/logs beyond Linux / ROS 2 Humble",
+      "kernel": "NOT FOUND in repo/logs",
+      "current_machine_note": "Local host running verification is an ASUS Vivobook 14X (Intel Core i5-13500H, 12 cores, 16 threads, 16 GB RAM, Ubuntu 26.04.1 LTS, kernel 7.0.0-34-generic); because timing logs explicitly designate the benchmark was performed on an Intel Core i9 system, local specs do not represent the benchmark host."
+    },
+    "evidence": "results/audit_final/live_ros2_verification.md:44; scripts/audit_final/06_causal_replay_and_ros2_forensics.py:294"
+  },
+  "i_random_seeds": {
+    "value": {
+      "flight_split_seed": 42,
+      "model_training_seed": 42,
+      "hist_gradient_boosting_seed": 42,
+      "logistic_regression_seed": 42,
+      "bootstrap_resampling_seed": 42,
+      "cross_validation_split_seed": 42,
+      "multi_seed_robustness_seeds": [0, 1, 2, 3, 4]
+    },
+    "evidence": "scripts/audit_final/03_models_and_baselines_forensics.py:58, 387, 408; scripts/audit_final/05_uncertainty_and_generalization.py:330, 456, 507; data/processed/expanded_flight_split.csv:1; results/figures/publication/captions.md:15"
+  }
+}

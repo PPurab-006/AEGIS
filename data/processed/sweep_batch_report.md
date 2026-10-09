@@ -4,7 +4,7 @@
 **Target Matrix**: 16 Cells x 3 Repeats = 48 Scheduled Flights  
 **Simulation Environment**: Gazebo Harmonic (`agriculture.world`), PX4 SITL (`x500_mono_cam`)  
 **VO Telemetry Pipeline**: `src/pipelines/run_offline_vo.py` (RAW mode, 5-point RANSAC)  
-**Master Log CSV**: [`data/processed/sweep_flight_log.csv`](file:///home/purab/Purab/Projects/Research2/data/processed/sweep_flight_log.csv)  
+**Master Log CSV**: [`data/processed/sweep_flight_log.csv`](data/processed/sweep_flight_log.csv)  
 
 ---
 
@@ -148,10 +148,10 @@ Verification of the physical flow dynamics across the 4 motion bins:
 
 ## 7. Artifact Index
 
-- **Master Flight Log**: [`data/processed/sweep_flight_log.csv`](file:///home/purab/Purab/Projects/Research2/data/processed/sweep_flight_log.csv)
-- **Batch Summary Report**: [`data/processed/sweep_batch_report.md`](file:///home/purab/Purab/Projects/Research2/data/processed/sweep_batch_report.md)
-- **Sweep Motion Controller**: [`scripts/fly_sweep_motion.py`](file:///home/purab/Purab/Projects/Research2/scripts/fly_sweep_motion.py)
-- **Sweep Batch Orchestrator**: [`scripts/11_run_sweep_batch.py`](file:///home/purab/Purab/Projects/Research2/scripts/11_run_sweep_batch.py)
-- **Datasets Directory**: [`results/datasets/`](file:///home/purab/Purab/Projects/ROS/results/datasets)
+- **Master Flight Log**: [`data/processed/sweep_flight_log.csv`](data/processed/sweep_flight_log.csv)
+- **Batch Summary Report**: [`data/processed/sweep_batch_report.md`](data/processed/sweep_batch_report.md)
+- **Sweep Motion Controller**: [`scripts/fly_sweep_motion.py`](scripts/fly_sweep_motion.py)
+- **Sweep Batch Orchestrator**: [`scripts/11_run_sweep_batch.py`](scripts/11_run_sweep_batch.py)
+- **Datasets Directory**: [`results/datasets/`](<RAW_DATA_DIR>)
 
 End of systematic sweep batch report.

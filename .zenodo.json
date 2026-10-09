@@ -1,0 +1,24 @@
+{
+  "title": "AEGIS: Telemetry-Based Early Warning of Monocular Visual Odometry Tracking Dropouts During Aggressive UAV Flight",
+  "creators": [
+    {
+      "name": "Sen, Purab",
+      "orcid": "0009-0002-8385-1435",
+      "affiliation": "Independent Researcher"
+    }
+  ],
+  "upload_type": "software",
+  "license": "apache-2.0",
+  "access_right": "open",
+  "version": "1.1.0",
+  "description": "Replication package for the AEGIS preprint: strict future-only evaluation of telemetry-based early warning of monocular visual odometry tracking dropouts, with audit scripts, result tables, model weights and verification scripts.",
+  "keywords": [
+    "visual odometry",
+    "early warning",
+    "failure prediction",
+    "UAV",
+    "telemetry",
+    "optical flow",
+    "ROS 2"
+  ]
+}

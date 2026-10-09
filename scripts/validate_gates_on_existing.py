@@ -86,10 +86,13 @@ HEALTH_WARN_TARGETS = [
 
 
 def find_dataset_dir() -> Path:
-    candidates = [
-        Path("/home/purab/Purab/Projects/ROS/results/datasets"),
+    candidates = []
+    if "AEGIS_DATA_DIR" in os.environ:
+        candidates.append(Path(os.environ["AEGIS_DATA_DIR"]))
+    candidates.extend([
         REPO_ROOT / "data" / "raw",
-    ]
+        Path(__file__).resolve().parents[2] / "ROS" / "results" / "datasets",
+    ])
     for c in candidates:
         if c.exists() and any(c.glob("sweep_*")):
             return c

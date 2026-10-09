@@ -1,0 +1,5 @@
+target_rate_hz,sent_frames,recv_frames,actual_pub_rate_hz,drop_count,drop_pct,roundtrip_ms_mean,roundtrip_ms_median,roundtrip_ms_p99,roundtrip_ms_max,queue_drift_ms,zero_drops_and_stable
+60,400,400,51.2,0,0.0,1.2791,1.2217,1.6377,18.6406,-0.7771,True
+100,400,400,77.8,0,0.0,1.1764,1.1051,2.0307,15.9439,-1.0313,True
+200,400,400,142.5,0,0.0,1.437,0.8829,23.2884,41.4849,-9.9725,True
+500,400,400,205.9,0,0.0,0.8831,0.6503,10.4884,16.5204,-4.5003,True

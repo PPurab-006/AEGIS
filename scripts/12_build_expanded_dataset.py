@@ -14,7 +14,7 @@ Hardened Eligibility:
 
 Inputs:
   data/processed/expanded_eligible_flights.txt
-  /home/purab/Purab/Projects/ROS/results/datasets/<flight_name>/
+  <AEGIS_DATA_DIR>/<flight_name>/
 
 Outputs:
   data/processed/expanded_flight_manifest.csv
@@ -25,6 +25,7 @@ Outputs:
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -204,7 +205,7 @@ def stratified_flight_split(
 def main():
     repo_root = Path(__file__).resolve().parent.parent
     processed_dir = repo_root / "data" / "processed"
-    data_dir = Path("/home/purab/Purab/Projects/ROS/results/datasets")
+    data_dir = Path(os.environ.get("AEGIS_DATA_DIR", repo_root / "data" / "raw"))
     manifest_txt = processed_dir / "expanded_eligible_flights.txt"
 
     print("=================================================================")

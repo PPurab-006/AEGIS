@@ -1,0 +1,5 @@
+flight,sent_frames,recv_frames,drop_pct,pub_to_cb_start_us_mean,pub_to_cb_start_us_median,pub_to_cb_start_us_p95,pub_to_cb_start_us_p99,pub_to_cb_start_us_max,cb_compute_us_mean,cb_compute_us_median,cb_compute_us_p95,cb_compute_us_p99,cb_compute_us_max,roundtrip_ms_mean,roundtrip_ms_median,roundtrip_ms_p95,roundtrip_ms_p99,roundtrip_ms_max
+sweep_A_C_R1,759,759,0.0,376.16,364.92,496.27,589.76,782.26,588.98,555.73,696.98,828.64,16168.74,1.2839,1.2556,1.5285,1.8067,17.0159
+sweep_G_C_R1,745,745,0.0,483.86,455.19,597.43,676.9,16173.83,758.45,694.09,886.62,1007.67,48619.69,1.5978,1.5116,1.793,2.0048,49.2755
+sweep_E_C_R1,738,738,0.0,459.59,456.39,588.01,658.89,1126.92,655.56,630.38,801.31,901.7,17188.89,1.4669,1.4362,1.7334,1.9523,17.9432
+sweep_M_C_R1,749,749,0.0,356.6,349.29,453.91,510.16,755.56,564.71,528.52,699.82,792.39,14915.97,1.2431,1.2048,1.4557,1.6169,15.5985

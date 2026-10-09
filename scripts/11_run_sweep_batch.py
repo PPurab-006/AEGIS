@@ -34,6 +34,7 @@ import subprocess
 import sys
 import threading
 import time
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -48,8 +49,8 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Paths and Environment Configuration
 # ---------------------------------------------------------------------------
-ROS_REPO    = Path("/home/purab/Purab/Projects/ROS")
-PX4_DIR     = os.environ.get("PX4_DIR", str(Path.home() / "PX4-Autopilot"))
+ROS_REPO    = Path(os.environ.get("AEGIS_ROS_DIR", Path(__file__).resolve().parents[2] / "ROS"))
+PX4_DIR     = os.environ.get("AEGIS_PX4_DIR", os.environ.get("PX4_DIR", str(Path(__file__).resolve().parents[2] / "PX4-Autopilot")))
 REPO_ROOT   = Path(__file__).resolve().parent.parent
 DATASET_DIR = ROS_REPO / "results" / "datasets"
 R2_RAW_DIR  = REPO_ROOT / "data" / "raw"
@@ -128,8 +129,8 @@ def kill_all():
         subprocess.run(["pkill", "-9", "-f", p], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.run(["pkill", "-9", "-f", "record_camera_dataset.py"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.run(["pkill", "-9", "-f", "fly_sweep_motion.py"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    # Clean /tmp socket locks
-    for f in glob.glob("/tmp/px4-sock-*"):
+    # Clean socket locks
+    for f in glob.glob(os.path.join(tempfile.gettempdir(), "px4-sock-*")):
         try:
             os.remove(f)
         except OSError:

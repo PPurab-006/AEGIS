@@ -14,7 +14,7 @@ Executes live validation using ROS 2 pub/sub communications:
 Inputs:
   models/expanded_scaler.joblib
   models/expanded_mlp.pt
-  /home/purab/Purab/Projects/ROS/results/datasets/sweep_A_C_R1/
+  <AEGIS_DATA_DIR>/sweep_A_C_R1/
 
 Outputs:
   data/processed/live_ros2_predictions.csv
@@ -85,7 +85,7 @@ def main():
     repo_root = Path(__file__).resolve().parent.parent
     processed_dir = repo_root / "data" / "processed"
     models_dir = repo_root / "models"
-    data_dir = Path("/home/purab/Purab/Projects/ROS/results/datasets")
+    data_dir = Path(os.environ.get("AEGIS_DATA_DIR", repo_root / "data" / "raw"))
 
     print("=================================================================")
     print("Research 2 — Live ROS 2 Deployment Validation (Condition: A_C)")

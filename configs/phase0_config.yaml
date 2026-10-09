@@ -9,7 +9,7 @@
 # ---------------------------------------------------------------------------
 source_repo:
   # Point this at your actual local VO_Research repo path.
-  local_path: "/home/purab/Purab/Projects/ROS"
+  local_path: "<RAW_DATA_DIR>"
   datasets_subdir: "results/datasets"
   # Provenance pin — the audit numbers below were computed against this
   # commit. If source repo HEAD differs, the fetch script will warn you

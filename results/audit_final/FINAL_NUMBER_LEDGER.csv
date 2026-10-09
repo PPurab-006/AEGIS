@@ -1,0 +1,58 @@
+metric,value,units,dataset,split,evaluation_protocol,threshold,source_script,source_output,status
+total_eligible_flights,42,flights,ROS_telemetry,all,raw_extraction,N/A,01_dataset_and_failure_forensics.py,dataset_flight_characterization.csv,VERIFIED
+total_raw_frames,51041,frames,ROS_telemetry,all,raw_extraction,N/A,01_dataset_and_failure_forensics.py,dataset_flight_characterization.csv,VERIFIED
+total_active_frames,31615,frames,ROS_telemetry,all,pos_z >= 2.0m,N/A,01_dataset_and_failure_forensics.py,dataset_flight_characterization.csv,VERIFIED
+train_flight_count,15,flights,ROS_telemetry,train,expanded_split,N/A,01_dataset_and_failure_forensics.py,dataset_flight_characterization.csv,VERIFIED
+val_flight_count,13,flights,ROS_telemetry,val,expanded_split,N/A,01_dataset_and_failure_forensics.py,dataset_flight_characterization.csv,VERIFIED
+test_flight_count,14,flights,ROS_telemetry,test,expanded_split,N/A,01_dataset_and_failure_forensics.py,dataset_flight_characterization.csv,VERIFIED
+flight_overlap_count,0,flights,ROS_telemetry,cross_split,set_intersection,N/A,01_dataset_and_failure_forensics.py,failure_mechanism_report.md,VERIFIED
+total_failure_frames,1978,frames,ROS_telemetry,all,inliers_pose < 8,N/A,01_dataset_and_failure_forensics.py,dataset_flight_characterization.csv,VERIFIED
+dataset_failure_rate_pct,6.2565,%,ROS_telemetry,all,inliers_pose < 8,N/A,01_dataset_and_failure_forensics.py,dataset_flight_characterization.csv,VERIFIED
+total_failure_episodes,1969,episodes,ROS_telemetry,all,contiguous_runs,N/A,01_dataset_and_failure_forensics.py,dataset_flight_characterization.csv,VERIFIED
+single_frame_episodes_pct,99.5937,%,ROS_telemetry,all,run_length == 1,N/A,01_dataset_and_failure_forensics.py,dataset_flight_characterization.csv,VERIFIED
+max_failure_episode_length,3,frames,ROS_telemetry,all,run_length,N/A,01_dataset_and_failure_forensics.py,dataset_flight_characterization.csv,VERIFIED
+p_failure_given_low_flow,97.0751,%,ROS_telemetry,all,flow_lag0 < 0.5,0.5 px,02_label_and_leakage_forensics.py,leakage_statistics.csv,VERIFIED
+p_low_flow_given_failure,97.3205,%,ROS_telemetry,all,flow_lag0 < 0.5 | failure,0.5 px,02_label_and_leakage_forensics.py,leakage_statistics.csv,VERIFIED
+is_r_frame_deterministic_mismatch,0,frames,ROS_telemetry,all,is_r == (yaw_rate > 15),15 deg/s,02_label_and_leakage_forensics.py,leakage_statistics.csv,VERIFIED
+test_active_frames,10551,frames,ROS_telemetry,test,pos_z >= 2.0m,N/A,02_label_and_leakage_forensics.py,label_forensics.md,VERIFIED
+test_legacy_eval_frames,10411,frames,ROS_telemetry,test,warmup5_tail5_dropped,N/A,02_label_and_leakage_forensics.py,frozen_legacy_vs_strict.csv,VERIFIED
+test_currently_failed_frames,653,frames,ROS_telemetry,test,is_failure == 1,N/A,02_label_and_leakage_forensics.py,label_forensics.md,VERIFIED
+test_strict_eval_frames,9758,frames,ROS_telemetry,test,clean_strict_frames,N/A,02_label_and_leakage_forensics.py,frozen_legacy_vs_strict.csv,VERIFIED
+frozen_legacy_auroc,0.8046,AUROC,ROS_telemetry,test,legacy_all_frames,0.50,03_models_and_baselines_forensics.py,frozen_legacy_vs_strict.csv,VERIFIED
+frozen_legacy_auprc,0.7260,AUPRC,ROS_telemetry,test,legacy_all_frames,0.50,03_models_and_baselines_forensics.py,frozen_legacy_vs_strict.csv,VERIFIED
+frozen_legacy_f1,0.6484,F1,ROS_telemetry,test,legacy_all_frames,0.50,03_models_and_baselines_forensics.py,frozen_legacy_vs_strict.csv,VERIFIED
+frozen_strict_auroc,0.7665,AUROC,ROS_telemetry,test,strict_clean_frames,0.50,03_models_and_baselines_forensics.py,frozen_legacy_vs_strict.csv,VERIFIED
+frozen_strict_auprc,0.5977,AUPRC,ROS_telemetry,test,strict_clean_frames,0.50,03_models_and_baselines_forensics.py,frozen_legacy_vs_strict.csv,VERIFIED
+frozen_strict_f1,0.5836,F1,ROS_telemetry,test,strict_clean_frames,0.50,03_models_and_baselines_forensics.py,frozen_legacy_vs_strict.csv,VERIFIED
+v0_strict_auroc,0.7665,AUROC,ROS_telemetry,test,strict_clean_frames,0.54 (val),03_models_and_baselines_forensics.py,retrained_variants_comparison.csv,VERIFIED
+v0_strict_auprc,0.5982,AUPRC,ROS_telemetry,test,strict_clean_frames,0.54 (val),03_models_and_baselines_forensics.py,retrained_variants_comparison.csv,VERIFIED
+v0_strict_f1_val_th,0.5775,F1,ROS_telemetry,test,strict_clean_frames,0.54 (val),03_models_and_baselines_forensics.py,retrained_variants_comparison.csv,VERIFIED
+v0_strict_f1_fixed,0.5758,F1,ROS_telemetry,test,strict_clean_frames,0.50,03_models_and_baselines_forensics.py,retrained_variants_comparison.csv,VERIFIED
+v1_drop_flow_lag0_auroc,0.7669,AUROC,ROS_telemetry,test,strict_clean_frames,0.56 (val),03_models_and_baselines_forensics.py,retrained_variants_comparison.csv,VERIFIED
+v2_drop_all_flow_auroc,0.7199,AUROC,ROS_telemetry,test,strict_clean_frames,0.44 (val),03_models_and_baselines_forensics.py,retrained_variants_comparison.csv,VERIFIED
+hgb_strict_auroc,0.7733,AUROC,ROS_telemetry,test,strict_clean_frames,0.34 (val),03_models_and_baselines_forensics.py,baseline_comparison.csv,VERIFIED
+hgb_strict_auprc,0.6101,AUPRC,ROS_telemetry,test,strict_clean_frames,0.34 (val),03_models_and_baselines_forensics.py,baseline_comparison.csv,VERIFIED
+lr_strict_auroc,0.7161,AUROC,ROS_telemetry,test,strict_clean_frames,0.27 (val),03_models_and_baselines_forensics.py,baseline_comparison.csv,VERIFIED
+yaw_rate_th_auroc,0.6895,AUROC,ROS_telemetry,test,strict_clean_frames,33.5 deg/s,03_models_and_baselines_forensics.py,baseline_comparison.csv,VERIFIED
+fsd_baseline_auroc,0.3964,AUROC,ROS_telemetry,test,strict_clean_frames,0.01,03_models_and_baselines_forensics.py,baseline_comparison.csv,VERIFIED
+legacy_minus_strict_auroc_diff,0.0387,AUROC,ROS_telemetry,test,paired_bootstrap_2000,0.50,05_uncertainty_and_generalization.py,bootstrap_paired_ci.csv,VERIFIED
+legacy_minus_strict_auroc_p_val,0.0000,p_value,ROS_telemetry,test,paired_bootstrap_2000,0.50,05_uncertainty_and_generalization.py,bootstrap_paired_ci.csv,VERIFIED
+frozen_minus_v0_auroc_diff,0.0004,AUROC,ROS_telemetry,test,paired_bootstrap_2000,0.50 vs 0.54,05_uncertainty_and_generalization.py,bootstrap_paired_ci.csv,VERIFIED
+frozen_minus_v0_auroc_p_val,0.9040,p_value,ROS_telemetry,test,paired_bootstrap_2000,0.50 vs 0.54,05_uncertainty_and_generalization.py,bootstrap_paired_ci.csv,VERIFIED
+loco_mean_auroc,0.6980,AUROC,ROS_telemetry,15_cell_folds,leave_one_cell_out,val_tuned,05_uncertainty_and_generalization.py,generalization_summary.csv,VERIFIED
+loyo_mean_auroc,0.6466,AUROC,ROS_telemetry,4_yaw_folds,leave_one_yaw_rate_out,val_tuned,05_uncertainty_and_generalization.py,generalization_summary.csv,VERIFIED
+logo_mean_auroc,0.7688,AUROC,ROS_telemetry,4_geom_folds,leave_one_geom_out,val_tuned,05_uncertainty_and_generalization.py,generalization_summary.csv,VERIFIED
+v0_w15_rising_edge_early_pct,59.35,%,ROS_telemetry,test,W=15_pre_onset,0.54,04_early_warning_and_alarms.py,event_warning_summary.csv,VERIFIED
+v0_w15_any_active_early_pct,83.15,%,ROS_telemetry,test,W=15_pre_onset,0.54,04_early_warning_and_alarms.py,event_warning_summary.csv,VERIFIED
+v0_w15_rising_edge_mean_lead_s,0.3369,seconds,ROS_telemetry,test,W=15_pre_onset,0.54,04_early_warning_and_alarms.py,event_warning_summary.csv,VERIFIED
+v0_w15_rising_edge_median_lead_s,0.3667,seconds,ROS_telemetry,test,W=15_pre_onset,0.54,04_early_warning_and_alarms.py,event_warning_summary.csv,VERIFIED
+v0_w15_alarm_duty_cycle_pct,41.16,%,ROS_telemetry,test,frame_duty_cycle,0.54,04_early_warning_and_alarms.py,event_warning_summary.csv,VERIFIED
+v0_w15_alarm_rising_edges_per_min,107.17,edges/min,ROS_telemetry,test,0_to_1_transitions,0.54,04_early_warning_and_alarms.py,event_warning_summary.csv,VERIFIED
+v0_w15_false_alarm_edges_per_min,25.93,edges/min,ROS_telemetry,test,no_onset_in_W15,0.54,04_early_warning_and_alarms.py,event_warning_summary.csv,VERIFIED
+hgb_w15_rising_edge_early_pct,76.66,%,ROS_telemetry,test,W=15_pre_onset,0.34,04_early_warning_and_alarms.py,event_warning_summary.csv,VERIFIED
+hgb_w15_false_alarm_edges_per_min,20.44,edges/min,ROS_telemetry,test,no_onset_in_W15,0.34,04_early_warning_and_alarms.py,event_warning_summary.csv,VERIFIED
+causal_replay_parity_max_diff,4.17e-07,probability,ROS_telemetry,test,streaming_vs_offline,0.50,06_causal_replay_and_ros2_forensics.py,causal_replay_comparison.csv,VERIFIED
+ros2_30hz_message_drop_rate,0.00,%,ROS_telemetry,4_flights,multi_process_ros2,0.50,06_causal_replay_and_ros2_forensics.py,live_ros2_run_a_latencies.csv,VERIFIED
+ros2_30hz_median_roundtrip_ms,1.24,ms,ROS_telemetry,sweep_M_C_R1,multi_process_ros2,0.50,06_causal_replay_and_ros2_forensics.py,live_ros2_run_a_latencies.csv,VERIFIED
+ros2_30hz_p99_roundtrip_ms,1.62,ms,ROS_telemetry,sweep_M_C_R1,multi_process_ros2,0.50,06_causal_replay_and_ros2_forensics.py,live_ros2_run_a_latencies.csv,VERIFIED
+ros2_500hz_message_drop_rate,0.00,%,synthetic_pacing,stress_run_b,multi_process_ros2,0.50,06_causal_replay_and_ros2_forensics.py,live_ros2_run_b_stress.csv,VERIFIED

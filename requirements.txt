@@ -1,3 +1,15 @@
-pandas>=2.0
-numpy>=1.24
-PyYAML>=6.0
+# Pinned requirements for AEGIS replication environment
+# Python 3.14.4 was used to run all verification scripts, training, and audits.
+torch==2.14.0
+scikit-learn==1.9.1
+numpy==2.5.3
+pandas==3.0.6
+opencv-python==4.10.0.84
+joblib==1.6.0
+matplotlib==3.10.7
+scipy==1.18.1
+PyYAML==6.0.3
+pytest==9.0.2
+python-docx==1.2.0
+pyulog==1.2.3
+pymavlink==2.4.49

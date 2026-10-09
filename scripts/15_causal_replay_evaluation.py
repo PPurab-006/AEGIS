@@ -24,7 +24,7 @@ Evaluates:
 
 Inputs:
   data/processed/expanded_flight_split.csv
-  /home/purab/Purab/Projects/ROS/results/datasets/<flight_name>/
+  <AEGIS_DATA_DIR>/<flight_name>/
   models/expanded_scaler.joblib
   models/expanded_mlp.pt
 
@@ -33,9 +33,14 @@ Outputs:
 """
 
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Any, Tuple
+
+repo_root = Path(__file__).resolve().parent.parent
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
 
 import numpy as np
 import pandas as pd
@@ -204,11 +209,84 @@ def replay_flight(
     return df_out, df_eval
 
 
+import argparse
+import os
+
+
+def replay_flight_from_frames(
+    flight_id: str,
+    df_flight: pd.DataFrame,
+    predictor: StreamingFailurePredictor,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Execute causal streaming replay from telemetry frames DataFrame."""
+    df_flight = df_flight.sort_values("timestamp").reset_index(drop=True)
+    predictor.reset()
+    records = []
+
+    for i, row in df_flight.iterrows():
+        telemetry = {
+            "timestamp": float(row["timestamp"]),
+            "eis_yaw_rate_deg": float(row["eis_yaw_rate_deg"]),
+            "feature_vel_mean": float(row["feature_vel_mean"]),
+            "is_r_frame": int(row["is_r_frame"]),
+        }
+        res = predictor.update(telemetry)
+
+        inliers = int(row["num_inliers_pose"])
+        is_failure = 1 if inliers < 8 else 0
+
+        rec = {
+            "flight_id": flight_id,
+            "frame_idx": i,
+            "timestamp": telemetry["timestamp"],
+            "has_prediction": res["has_prediction"],
+            "predicted_prob": res["prob"],
+            "pred_label": res["pred_label"],
+            "feat_lat_us": res["latencies_us"]["feature_construction_us"],
+            "scale_lat_us": res["latencies_us"]["scaler_transform_us"],
+            "mlp_lat_us": res["latencies_us"]["mlp_inference_us"],
+            "e2e_lat_us": res["latencies_us"]["end_to_end_us"],
+            "actual_inliers": inliers,
+            "actual_is_failure": is_failure,
+        }
+        records.append(rec)
+
+    df_out = pd.DataFrame(records)
+    forward_shifts = pd.concat([df_out["actual_is_failure"].shift(-step) for step in range(6)], axis=1)
+    df_out["k5_label"] = forward_shifts.max(axis=1)
+
+    valid_mask = df_out["has_prediction"] & df_out["k5_label"].notna()
+    df_eval = df_out[valid_mask].copy().reset_index(drop=True)
+
+    return df_out, df_eval
+
+
 def main():
+    parser = argparse.ArgumentParser(description="Causal Replay Evaluation")
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=Path(os.environ.get("AEGIS_DATA_DIR", Path(__file__).resolve().parents[1] / "data" / "raw")),
+        help="Path to raw ROS dataset directory",
+    )
+    parser.add_argument(
+        "--frames-file",
+        type=Path,
+        default=None,
+        help="Path to telemetry_frames.csv.gz to replay directly from frames",
+    )
+    parser.add_argument(
+        "--out-json",
+        type=Path,
+        default=None,
+        help="Path to save evaluation metrics JSON",
+    )
+    args = parser.parse_args()
+
     repo_root = Path(__file__).resolve().parent.parent
     processed_dir = repo_root / "data" / "processed"
     models_dir = repo_root / "models"
-    data_dir = Path("/home/purab/Purab/Projects/ROS/results/datasets")
+    data_dir = args.data_dir
 
     print("=================================================================")
     print("Research 2 — Causal Replay & Latency / Lead-Time Evaluation")
@@ -249,9 +327,20 @@ def main():
     positive_transitions = 0
     false_warning_episodes = 0
 
+    telemetry_frames_map = None
+    if args.frames_file is not None and args.frames_file.exists():
+        print(f"Using pre-extracted frames from {args.frames_file}...")
+        df_frames_all = pd.read_csv(args.frames_file)
+        telemetry_frames_map = {f: grp for f, grp in df_frames_all.groupby("run_dir")}
+
     print("\n--- Executing Causal Streaming Replay Across Test Flights ---")
     for f_idx, fl in enumerate(test_flights, 1):
-        df_stream, df_eval = replay_flight(fl, data_dir, predictor)
+        if telemetry_frames_map is not None:
+            if fl not in telemetry_frames_map:
+                raise ValueError(f"Flight {fl} not found in {args.frames_file}")
+            df_stream, df_eval = replay_flight_from_frames(fl, telemetry_frames_map[fl], predictor)
+        else:
+            df_stream, df_eval = replay_flight(fl, data_dir, predictor)
         all_dfs.append(df_stream)
         all_evals.append(df_eval)
 
@@ -431,7 +520,14 @@ def main():
         "flight_summaries": flight_summaries,
     }
 
-    out_json = processed_dir / "causal_replay_evaluation_metrics.json"
+    if args.out_json is not None:
+        out_json = args.out_json
+    elif args.frames_file is not None:
+        out_json = repo_root / "results" / "audit" / "causal_replay_from_frames_metrics.json"
+    else:
+        out_json = processed_dir / "causal_replay_evaluation_metrics.json"
+
+    out_json.parent.mkdir(parents=True, exist_ok=True)
     with open(out_json, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
     print(f"\nSaved metrics JSON to: {out_json.name}")

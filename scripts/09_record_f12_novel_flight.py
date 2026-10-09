@@ -38,8 +38,8 @@ from scipy.spatial.transform import Rotation as R_scipy
 # ============================================================
 # Configuration
 # ============================================================
-ROS_REPO   = Path("/home/purab/Purab/Projects/ROS")
-PX4_DIR    = os.environ.get("PX4_DIR", str(Path.home() / "PX4-Autopilot"))
+ROS_REPO   = Path(os.environ.get("AEGIS_ROS_DIR", Path(__file__).resolve().parents[2] / "ROS"))
+PX4_DIR    = os.environ.get("AEGIS_PX4_DIR", os.environ.get("PX4_DIR", str(Path(__file__).resolve().parents[2] / "PX4-Autopilot")))
 MODEL      = "gz_x500_mono_cam"
 SPAWN_POSE = "14.0505,-7.5229,0.1076,0,0,0"
 WORLD_NAME = "default"
